@@ -1,6 +1,7 @@
 pub mod backfill;
 pub mod cover_art;
 pub mod import;
+pub mod parity;
 pub mod playback;
 pub mod search;
 
@@ -24,7 +25,6 @@ const STATUS_STAGED: &str = "staged";
 const STATUS_ACCEPTED: &str = "accepted";
 const COVERS_DIR: &str = "covers";
 
-#[tauri::command(rename_all = "camelCase")]
 fn import_files(
     app: tauri::AppHandle,
     paths: Vec<String>,
@@ -46,12 +46,10 @@ fn import_files(
     })
 }
 
-#[tauri::command(rename_all = "camelCase")]
 fn load_tracks(db_path: String) -> Result<import::LibrarySnapshot, String> {
     import::load_tracks(&db_path)
 }
 
-#[tauri::command(rename_all = "camelCase")]
 fn load_playlists(db_path: String) -> Result<import::PlaylistSnapshot, String> {
     import::load_playlists(&db_path)
 }
@@ -66,7 +64,6 @@ fn clear_tracks(app: tauri::AppHandle, db_path: String) -> Result<(), String> {
     import::clear_tracks(&db_path, &cache_dir)
 }
 
-#[tauri::command(rename_all = "camelCase")]
 fn backfill_search_text(db_path: String) -> Result<usize, String> {
     backfill::run_backfill(&db_path)
 }
@@ -217,7 +214,6 @@ fn record_track_play(db_path: String, track_id: String) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command(rename_all = "camelCase")]
 fn load_recently_played(db_path: String, limit: i32) -> Result<Vec<import::ImportedTrack>, String> {
     if !Path::new(&db_path).exists() {
         return Ok(Vec::new());
@@ -229,7 +225,6 @@ fn load_recently_played(db_path: String, limit: i32) -> Result<Vec<import::Impor
     import::load_recently_played(&conn, limit)
 }
 
-#[tauri::command(rename_all = "camelCase")]
 fn create_playlist(db_path: String, id: String, name: String) -> Result<(), String> {
     if let Some(parent) = Path::new(&db_path).parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -252,7 +247,6 @@ fn create_playlist(db_path: String, id: String, name: String) -> Result<(), Stri
     Ok(())
 }
 
-#[tauri::command(rename_all = "camelCase")]
 fn add_tracks_to_playlist(
     db_path: String,
     playlist_id: String,
@@ -290,7 +284,6 @@ fn add_tracks_to_playlist(
     Ok(())
 }
 
-#[tauri::command(rename_all = "camelCase")]
 fn remove_last_tracks_from_playlist(
     db_path: String,
     playlist_id: String,
@@ -316,7 +309,6 @@ fn remove_last_tracks_from_playlist(
     Ok(())
 }
 
-#[tauri::command(rename_all = "camelCase")]
 fn delete_playlist(db_path: String, playlist_id: String) -> Result<(), String> {
     let conn = Connection::open(&db_path).map_err(|error| error.to_string())?;
     conn.execute("DELETE FROM playlists WHERE id = ?1", [&playlist_id])
@@ -366,28 +358,52 @@ fn write_tags_to_file(
 
         match key.as_str() {
             "title" => {
-                tag.insert(TagItem::new(ItemKey::TrackTitle, ItemValue::Text(text_value)));
+                tag.insert(TagItem::new(
+                    ItemKey::TrackTitle,
+                    ItemValue::Text(text_value),
+                ));
             }
             "artist" => {
-                tag.insert(TagItem::new(ItemKey::TrackArtist, ItemValue::Text(text_value)));
+                tag.insert(TagItem::new(
+                    ItemKey::TrackArtist,
+                    ItemValue::Text(text_value),
+                ));
             }
             "artists" => {
-                tag.insert(TagItem::new(ItemKey::AlbumArtist, ItemValue::Text(text_value)));
+                tag.insert(TagItem::new(
+                    ItemKey::AlbumArtist,
+                    ItemValue::Text(text_value),
+                ));
             }
             "album" => {
-                tag.insert(TagItem::new(ItemKey::AlbumTitle, ItemValue::Text(text_value)));
+                tag.insert(TagItem::new(
+                    ItemKey::AlbumTitle,
+                    ItemValue::Text(text_value),
+                ));
             }
             "trackNumber" => {
-                tag.insert(TagItem::new(ItemKey::TrackNumber, ItemValue::Text(text_value)));
+                tag.insert(TagItem::new(
+                    ItemKey::TrackNumber,
+                    ItemValue::Text(text_value),
+                ));
             }
             "trackTotal" => {
-                tag.insert(TagItem::new(ItemKey::TrackTotal, ItemValue::Text(text_value)));
+                tag.insert(TagItem::new(
+                    ItemKey::TrackTotal,
+                    ItemValue::Text(text_value),
+                ));
             }
             "discNumber" => {
-                tag.insert(TagItem::new(ItemKey::DiscNumber, ItemValue::Text(text_value)));
+                tag.insert(TagItem::new(
+                    ItemKey::DiscNumber,
+                    ItemValue::Text(text_value),
+                ));
             }
             "discTotal" => {
-                tag.insert(TagItem::new(ItemKey::DiscTotal, ItemValue::Text(text_value)));
+                tag.insert(TagItem::new(
+                    ItemKey::DiscTotal,
+                    ItemValue::Text(text_value),
+                ));
             }
             "year" => {
                 tag.insert(TagItem::new(ItemKey::Year, ItemValue::Text(text_value)));
@@ -437,8 +453,8 @@ fn write_tags_to_file(
 
     // Handle cover art
     if let Some(cover_path) = cover_art_full_path {
-        let cover_bytes = std::fs::read(cover_path)
-            .map_err(|e| format!("Failed to read cover art: {}", e))?;
+        let cover_bytes =
+            std::fs::read(cover_path).map_err(|e| format!("Failed to read cover art: {}", e))?;
         tag.remove_picture_type(PictureType::CoverFront);
         tag.push_picture(Picture::new_unchecked(
             PictureType::CoverFront,
@@ -597,7 +613,20 @@ fn update_track_metadata(
             },
         );
 
-        if let Ok((title, artist, album, album_artist, genre_json, comment_json, label, filename, year, track_number, disc_number)) = row {
+        if let Ok((
+            title,
+            artist,
+            album,
+            album_artist,
+            genre_json,
+            comment_json,
+            label,
+            filename,
+            year,
+            track_number,
+            disc_number,
+        )) = row
+        {
             let genres: Vec<String> = genre_json
                 .and_then(|g| serde_json::from_str(&g).ok())
                 .unwrap_or_default();
@@ -612,8 +641,16 @@ fn update_track_metadata(
                 artist: artist.as_deref(),
                 album: album.as_deref(),
                 album_artist: album_artist.as_deref(),
-                genres: if genre_refs.is_empty() { None } else { Some(&genre_refs) },
-                comments: if comment_refs.is_empty() { None } else { Some(&comment_refs) },
+                genres: if genre_refs.is_empty() {
+                    None
+                } else {
+                    Some(&genre_refs)
+                },
+                comments: if comment_refs.is_empty() {
+                    None
+                } else {
+                    Some(&comment_refs)
+                },
                 label: label.as_deref(),
                 filename: filename.as_deref(),
                 year,
@@ -649,10 +686,7 @@ fn update_track_metadata(
 
         if let Some(ref path) = source_path {
             if let Err(e) = write_tags_to_file(path, &updates, cover_art_full_path.as_deref()) {
-                eprintln!(
-                    "Warning: failed to write tags to file '{}': {}",
-                    path, e
-                );
+                eprintln!("Warning: failed to write tags to file '{}': {}", path, e);
             }
         }
     }
@@ -717,29 +751,58 @@ fn execute_bulk_track_operation(
     Ok(())
 }
 
-#[tauri::command(rename_all = "camelCase")]
 fn accept_tracks(db_path: String, track_ids: Vec<String>) -> Result<(), String> {
     execute_bulk_track_operation(
         &db_path,
         &track_ids,
-        &format!("UPDATE tracks SET import_status = '{}' WHERE id IN ({{}})", STATUS_ACCEPTED),
+        &format!(
+            "UPDATE tracks SET import_status = '{}' WHERE id IN ({{}})",
+            STATUS_ACCEPTED
+        ),
     )
 }
 
-#[tauri::command(rename_all = "camelCase")]
 fn unaccept_tracks(db_path: String, track_ids: Vec<String>) -> Result<(), String> {
     execute_bulk_track_operation(
         &db_path,
         &track_ids,
-        &format!("UPDATE tracks SET import_status = '{}' WHERE id IN ({{}})", STATUS_STAGED),
+        &format!(
+            "UPDATE tracks SET import_status = '{}' WHERE id IN ({{}})",
+            STATUS_STAGED
+        ),
     )
 }
 
-#[tauri::command(rename_all = "camelCase")]
 fn reject_tracks(db_path: String, track_ids: Vec<String>) -> Result<(), String> {
     execute_bulk_track_operation(&db_path, &track_ids, "DELETE FROM tracks WHERE id IN ({})")
 }
 
+#[tauri::command]
+fn clipboard_has_image() -> Result<bool, String> {
+    parity::desktop::clipboard_has_image()
+}
+
+#[tauri::command]
+fn cache_clipboard_cover_art(
+    app: tauri::AppHandle,
+) -> Result<Option<parity::desktop::CachedClipboardCover>, String> {
+    parity::desktop::cache_clipboard_cover_art(app)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn copy_image_to_clipboard(file_path: String) -> Result<bool, String> {
+    parity::desktop::copy_image_to_clipboard(file_path)
+}
+
+#[tauri::command]
+fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    parity::desktop::open_external(app, url)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn show_item_in_folder(app: tauri::AppHandle, file_path: String) -> Result<(), String> {
+    parity::desktop::show_item_in_folder(app, file_path)
+}
 #[derive(Clone, Serialize)]
 struct DragDropPayload {
     kind: &'static str,
@@ -757,8 +820,6 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_sql::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
         .manage(audio_player.clone())
         .setup(move |app| {
@@ -795,20 +856,45 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            import_files,
-            backfill_search_text,
+            parity::commands::import_files,
+            parity::commands::backfill_search_text,
             backfill_cover_art,
-            create_playlist,
-            delete_playlist,
-            add_tracks_to_playlist,
-            remove_last_tracks_from_playlist,
-            load_tracks,
-            load_playlists,
-            load_recently_played,
+            parity::commands::create_playlist,
+            parity::commands::delete_playlist,
+            parity::commands::add_tracks_to_playlist,
+            parity::commands::remove_last_tracks_from_playlist,
+            parity::database::load_tracks,
+            parity::commands::load_playlists,
+            parity::database::load_recently_played,
             clear_tracks,
-            accept_tracks,
-            unaccept_tracks,
-            reject_tracks,
+            parity::commands::accept_tracks,
+            parity::commands::unaccept_tracks,
+            parity::commands::reject_tracks,
+            parity::commands::delete_tracks,
+            parity::commands::validate_library_structure,
+            parity::commands::repair_library_structure,
+            parity::commands::verify_library_files,
+            parity::commands::list_missing_tracks,
+            parity::commands::relink_track,
+            parity::commands::auto_relink_missing,
+            parity::commands::update_playlist,
+            parity::commands::reorder_playlists,
+            parity::commands::delete_playlists,
+            parity::commands::restore_playlists,
+            parity::commands::create_playlist_folder,
+            parity::commands::update_playlist_folder,
+            parity::commands::delete_playlist_folder,
+            parity::commands::set_playlist_tracks,
+            parity::commands::list_playlist_history,
+            parity::commands::undo_playlist_history,
+            parity::commands::redo_playlist_history,
+            parity::commands::create_playlist_snapshot,
+            parity::commands::list_playlist_snapshots,
+            parity::commands::restore_playlist_snapshot,
+            parity::commands::delete_playlist_snapshot,
+            parity::commands::rebuild_search_index,
+            parity::database::search_tracks,
+            parity::database::migrate_artist_credits,
             playback_play_file,
             playback_toggle,
             playback_play,
@@ -823,7 +909,12 @@ pub fn run() {
             update_track_analysis,
             update_track_metadata,
             cache_cover_art_from_file,
-            record_track_play
+            record_track_play,
+            clipboard_has_image,
+            cache_clipboard_cover_art,
+            copy_image_to_clipboard,
+            open_external,
+            show_item_in_folder
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

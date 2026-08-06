@@ -10,7 +10,6 @@ import {
   type OpenDialogOptions,
   type SaveDialogOptions,
 } from "@tauri-apps/plugin-dialog";
-import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 
 export type BridgeEvent = { payload: unknown };
 export type WindowControlAction = "minimize" | "toggleMaximize" | "close";
@@ -51,18 +50,6 @@ const localListeners = new Map<string, Set<(payload: unknown) => void>>();
 const emitLocal = (event: string, payload: unknown) => {
   for (const listener of localListeners.get(event) ?? []) listener(payload);
 };
-
-// Tauri owns native file-drop handling, preserving absolute paths even when
-// the webview intentionally withholds the non-standard File.path property.
-void currentWindow.onDragDropEvent((event) => {
-  if (event.payload.type === "over") {
-    emitLocal("muro://native-drag", { kind: "over", paths: [] });
-  } else if (event.payload.type === "drop") {
-    emitLocal("muro://native-drag", { kind: "drop", paths: event.payload.paths });
-  } else {
-    emitLocal("muro://native-drag", { kind: "leave", paths: [] });
-  }
-});
 
 void currentWindow.onResized(async () => {
   emitLocal("muro://window-maximized", { maximized: await currentWindow.isMaximized() });
@@ -120,8 +107,8 @@ const bridgeImpl: MuroBridge = {
   isWindowMaximized: () => currentWindow.isMaximized(),
   openDialog: (options) => showOpenDialog(normalizeOpenOptions(options)),
   saveDialog: (options) => showSaveDialog(options as SaveDialogOptions),
-  openExternal: openUrl,
-  showItemInFolder: revealItemInDir,
+  openExternal: (url) => tauriInvoke("open_external", { url }),
+  showItemInFolder: (filePath) => tauriInvoke("show_item_in_folder", { filePath }),
   startFileDrag(filePaths) {
     void tauriInvoke("start_file_drag", { filePaths }).catch(() => undefined);
   },

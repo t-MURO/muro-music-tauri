@@ -841,4 +841,3 @@ fn clear_media_controls() {
         let _ = controls.set_playback(MediaPlayback::Stopped);
     }
 }
-
