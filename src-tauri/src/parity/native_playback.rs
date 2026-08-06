@@ -5,21 +5,28 @@
 //! playback, preload, gain and transition state.
 
 use rodio::cpal::traits::{DeviceTrait, HostTrait};
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
+use rodio::source::SeekError;
+use rodio::{Decoder, OutputStream, OutputStreamHandle, Sample, Sink, Source};
 use serde::{Deserialize, Serialize};
 use souvlaki::{
     MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig,
     SeekDirection,
 };
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::BufReader;
-use std::path::Path;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{
+    mpsc::{self, Receiver, Sender},
+    Arc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 #[cfg(windows)]
 use tauri::Manager;
 use tauri::{AppHandle, Emitter, State};
+use wsola::TimeStretch;
 
 const ACTOR_TICK: Duration = Duration::from_millis(20);
 const POSITION_EVENT_INTERVAL: Duration = Duration::from_millis(100);
@@ -177,6 +184,7 @@ enum ActorCommand {
     IsFinished(Reply),
     TransitionTo(PlaybackTrackInput, TransitionPlan, bool, Reply),
     CancelTransition(Reply),
+    SourceEnded(u64),
     Shutdown,
 }
 
@@ -188,12 +196,13 @@ pub struct NativePlaybackService {
 impl NativePlaybackService {
     pub fn new(app: AppHandle) -> Result<Self, String> {
         let (tx, rx) = mpsc::channel();
+        let actor_tx = tx.clone();
         let (ready_tx, ready_rx) = mpsc::channel();
         thread::Builder::new()
             .name("muro-native-playback".to_string())
             .spawn(move || {
                 let (media_tx, media_rx) = mpsc::channel();
-                match PlaybackActor::new(app, media_tx) {
+                match PlaybackActor::new(app, media_tx, actor_tx) {
                     Ok(actor) => {
                         let _ = ready_tx.send(Ok(()));
                         actor.run(rx, media_rx);
@@ -245,18 +254,247 @@ impl Drop for NativePlaybackService {
     }
 }
 
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeekModePreference {
+    Fast = 0,
+    Accurate = 1,
+}
+
+impl SeekModePreference {
+    fn from_name(value: &str) -> Self {
+        if value.eq_ignore_ascii_case("fast") {
+            Self::Fast
+        } else {
+            Self::Accurate
+        }
+    }
+
+    fn load(value: &AtomicU8) -> Self {
+        if value.load(Ordering::Relaxed) == Self::Fast as u8 {
+            Self::Fast
+        } else {
+            Self::Accurate
+        }
+    }
+
+    fn seek_target(self, seconds: f64) -> f64 {
+        match self {
+            // Rodio 0.19 does not expose Symphonia's coarse/accurate switch.
+            // A coarse target avoids decoding an arbitrary sub-frame tail while
+            // accurate mode preserves the exact renderer-requested timestamp.
+            Self::Fast => (seconds * 4.0).floor() / 4.0,
+            Self::Accurate => seconds,
+        }
+    }
+}
+
+struct EndNotifyingSource<S> {
+    inner: S,
+    actor_tx: Sender<ActorCommand>,
+    token: u64,
+    notified: bool,
+}
+
+impl<S> Iterator for EndNotifyingSource<S>
+where
+    S: Source,
+    S::Item: Sample,
+{
+    type Item = S::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let sample = self.inner.next();
+        if sample.is_none() && !self.notified {
+            self.notified = true;
+            let _ = self.actor_tx.send(ActorCommand::SourceEnded(self.token));
+        }
+        sample
+    }
+}
+
+impl<S> Source for EndNotifyingSource<S>
+where
+    S: Source,
+    S::Item: Sample,
+{
+    fn current_frame_len(&self) -> Option<usize> {
+        self.inner.current_frame_len()
+    }
+
+    fn channels(&self) -> u16 {
+        self.inner.channels()
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.inner.sample_rate()
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.inner.total_duration()
+    }
+
+    fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
+        self.inner.try_seek(pos)?;
+        self.notified = false;
+        Ok(())
+    }
+}
+
+const WSOLA_INPUT_FRAMES: usize = 4096;
+
+struct WsolaSource<S> {
+    inner: S,
+    stretcher: TimeStretch,
+    output: VecDeque<f32>,
+    startup_input: Vec<f32>,
+    channels: u16,
+    sample_rate: u32,
+    tempo: f32,
+    duration: Option<Duration>,
+    eof: bool,
+    produced_output: bool,
+}
+
+impl<S> WsolaSource<S>
+where
+    S: Source<Item = i16>,
+{
+    fn new(inner: S, tempo: f32) -> Result<Self, String> {
+        let channels = inner.channels();
+        let sample_rate = inner.sample_rate();
+        let mut stretcher = TimeStretch::new(sample_rate, channels)
+            .map_err(|error| format!("Could not initialize preserve-pitch processing: {error}"))?;
+        stretcher.set_tempo(tempo);
+        let tempo = stretcher.tempo();
+        let duration = inner
+            .total_duration()
+            .map(|duration| Duration::from_secs_f64(duration.as_secs_f64() / f64::from(tempo)));
+        let mut source = Self {
+            inner,
+            stretcher,
+            output: VecDeque::new(),
+            startup_input: Vec::new(),
+            channels,
+            sample_rate,
+            tempo,
+            duration,
+            eof: false,
+            produced_output: false,
+        };
+        source.refill();
+        Ok(source)
+    }
+
+    fn refill(&mut self) {
+        let channels = usize::from(self.channels);
+        while self.output.is_empty() && !self.eof {
+            let target_samples = WSOLA_INPUT_FRAMES * channels;
+            let mut input = Vec::with_capacity(target_samples);
+            while input.len() < target_samples {
+                match self.inner.next() {
+                    Some(sample) => input.push(f32::from(sample) / 32768.0),
+                    None => {
+                        self.eof = true;
+                        break;
+                    }
+                }
+            }
+
+            // A corrupt/truncated source may end inside an interleaved frame.
+            // WSOLA requires complete channel groups, so discard only that tail.
+            input.truncate(input.len() / channels * channels);
+            if !input.is_empty() {
+                if !self.produced_output {
+                    self.startup_input.extend_from_slice(&input);
+                }
+                self.stretcher.push(&input);
+            }
+
+            let ready = if self.eof {
+                self.stretcher.flush()
+            } else {
+                self.stretcher.pull(usize::MAX)
+            };
+            if !ready.is_empty() {
+                self.produced_output = true;
+                self.startup_input.clear();
+                self.output.extend(ready);
+            } else if self.eof && !self.produced_output {
+                // The WSOLA window is around 30 ms. Preserve very short clips
+                // rather than dropping them when they cannot fill one window.
+                self.output.extend(self.startup_input.drain(..));
+            }
+        }
+    }
+}
+
+impl<S> Iterator for WsolaSource<S>
+where
+    S: Source<Item = i16>,
+{
+    type Item = f32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.output.is_empty() {
+            self.refill();
+        }
+        self.output.pop_front()
+    }
+}
+
+impl<S> Source for WsolaSource<S>
+where
+    S: Source<Item = i16>,
+{
+    fn current_frame_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.duration
+    }
+
+    fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
+        let source_position = Duration::from_secs_f64(pos.as_secs_f64() * f64::from(self.tempo));
+        self.inner.try_seek(source_position)?;
+        self.stretcher.reset();
+        self.output.clear();
+        self.startup_input.clear();
+        self.eof = false;
+        self.produced_output = false;
+        Ok(())
+    }
+}
+
 struct Voice {
+    token: u64,
     input: PlaybackTrackInput,
     sink: Sink,
     duration: f64,
+    playback_rate: f64,
+    preserve_pitch: bool,
 }
 
 impl Voice {
+    fn rendered_position(&self) -> f64 {
+        self.sink.get_pos().as_secs_f64()
+    }
+
     fn position(&self) -> f64 {
-        self.sink
-            .get_pos()
-            .as_secs_f64()
-            .min(self.duration.max(0.0))
+        (self.rendered_position() * self.playback_rate).min(self.duration.max(0.0))
+    }
+
+    fn rendered_seek_position(&self, source_position: f64) -> Duration {
+        Duration::from_secs_f64(source_position / self.playback_rate.max(f64::EPSILON))
     }
 
     fn playing(&self) -> bool {
@@ -293,47 +531,91 @@ struct PlaybackActor {
     app: AppHandle,
     media_controls: Option<MediaControls>,
     media_track_id: Option<String>,
-    _stream: OutputStream,
-    stream_handle: OutputStreamHandle,
+    _stream: Option<OutputStream>,
+    stream_handle: Option<OutputStreamHandle>,
+    actor_tx: Sender<ActorCommand>,
+    next_voice_token: u64,
     active: Option<Voice>,
     preloaded: Option<Voice>,
     fade: Option<FadeState>,
     volume: f64,
     gapless: bool,
     crossfade_seconds: f64,
-    seek_mode: String,
+    seek_mode: Arc<AtomicU8>,
     output_device: String,
     ended_reported: bool,
     last_position_event: Instant,
 }
 
 impl PlaybackActor {
-    fn new(app: AppHandle, media_tx: Sender<NativeMediaAction>) -> Result<Self, String> {
-        let (stream, stream_handle) = open_output_stream("")?;
+    fn new(
+        app: AppHandle,
+        media_tx: Sender<NativeMediaAction>,
+        actor_tx: Sender<ActorCommand>,
+    ) -> Result<Self, String> {
         let media_controls = init_media_controls(&app, media_tx);
         Ok(Self {
             app,
             media_controls,
             media_track_id: None,
-            _stream: stream,
-            stream_handle,
+            _stream: None,
+            stream_handle: None,
+            actor_tx,
+            next_voice_token: 1,
             active: None,
             preloaded: None,
             fade: None,
             volume: 0.8,
             gapless: true,
             crossfade_seconds: 0.0,
-            seek_mode: "accurate".to_string(),
+            seek_mode: Arc::new(AtomicU8::new(SeekModePreference::Accurate as u8)),
             output_device: String::new(),
             ended_reported: false,
             last_position_event: Instant::now(),
         })
     }
 
+    fn ensure_output(&mut self) -> Result<(), String> {
+        if self.stream_handle.is_none() {
+            let (stream, handle) = open_output_stream(&self.output_device)?;
+            self._stream = Some(stream);
+            self.stream_handle = Some(handle);
+        }
+        Ok(())
+    }
+
+    fn make_voice(
+        &mut self,
+        track: PlaybackTrackInput,
+        paused: bool,
+        start_position: f64,
+        playback_rate: f64,
+        preserve_pitch: bool,
+    ) -> Result<Voice, String> {
+        self.ensure_output()?;
+        let playback_rate = sanitize_rate(playback_rate);
+        let token = self.next_voice_token;
+        self.next_voice_token = self.next_voice_token.wrapping_add(1).max(1);
+        create_voice(
+            self.stream_handle
+                .as_ref()
+                .expect("output handle initialized above"),
+            track,
+            paused,
+            start_position,
+            playback_rate,
+            preserve_pitch,
+            self.seek_mode.clone(),
+            self.actor_tx.clone(),
+            token,
+        )
+    }
+
     fn run(mut self, rx: Receiver<ActorCommand>, media_rx: Receiver<NativeMediaAction>) {
         loop {
             match rx.recv_timeout(ACTOR_TICK) {
                 Ok(ActorCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Ok(ActorCommand::SourceEnded(token)) => self.handle_source_ended(token),
                 Ok(command) => self.dispatch(command),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
@@ -441,11 +723,8 @@ impl PlaybackActor {
                 (Ok(ActorResponse::Unit), reply)
             }
             ActorCommand::SetSeekMode(mode, reply) => {
-                self.seek_mode = if mode == "fast" {
-                    mode
-                } else {
-                    "accurate".to_string()
-                };
+                let preference = SeekModePreference::from_name(&mode);
+                self.seek_mode.store(preference as u8, Ordering::Relaxed);
                 (Ok(ActorResponse::Unit), reply)
             }
             ActorCommand::SetOutputDevice(device, reply) => (
@@ -472,6 +751,7 @@ impl PlaybackActor {
                 self.cancel_transition();
                 (Ok(ActorResponse::Unit), reply)
             }
+            ActorCommand::SourceEnded(_) => return,
             ActorCommand::Shutdown => return,
         };
         if let Err(message) = &result {
@@ -481,8 +761,9 @@ impl PlaybackActor {
     }
 
     fn play_file(&mut self, track: PlaybackTrackInput) -> Result<(), String> {
+        let voice = self.make_voice(track, true, 0.0, 1.0, false)?;
         self.stop_all();
-        let voice = create_voice(&self.stream_handle, track, false, 0.0)?;
+        voice.sink.play();
         self.active = Some(voice);
         self.ended_reported = false;
         self.apply_levels();
@@ -491,11 +772,13 @@ impl PlaybackActor {
     }
 
     fn set_preload(&mut self, track: Option<PlaybackTrackInput>) -> Result<(), String> {
+        let prepared = match track {
+            Some(track) => Some(self.make_voice(track, true, 0.0, 1.0, false)?),
+            None => None,
+        };
         self.clear_preload();
-        if let Some(track) = track {
-            self.preloaded = Some(create_voice(&self.stream_handle, track, true, 0.0)?);
-            self.apply_levels();
-        }
+        self.preloaded = prepared;
+        self.apply_levels();
         Ok(())
     }
 
@@ -548,10 +831,13 @@ impl PlaybackActor {
             .active
             .as_ref()
             .ok_or_else(|| "Nothing is loaded".to_string())?;
-        let target = sanitize_seconds(position, 0.0, active.duration);
+        let requested = sanitize_seconds(position, 0.0, active.duration);
+        let mode = SeekModePreference::load(&self.seek_mode);
+        let target = mode.seek_target(requested);
+        let rendered_target = active.rendered_seek_position(target);
         active
             .sink
-            .try_seek(Duration::from_secs_f64(target))
+            .try_seek(rendered_target)
             .map_err(|error| format!("Failed to seek: {error}"))?;
         self.ended_reported = false;
         let _ = self.app.emit("muro://playback-position", target);
@@ -563,8 +849,9 @@ impl PlaybackActor {
         &mut self,
         track: PlaybackTrackInput,
         plan: TransitionPlan,
-        _preserve_pitch: bool,
+        preserve_pitch: bool,
     ) -> Result<(), String> {
+        let rate = sanitize_rate(plan.rate);
         let (from_id, is_playing) = self
             .active
             .as_ref()
@@ -573,10 +860,13 @@ impl PlaybackActor {
         if !is_playing {
             return Err("Nothing playing to transition from".to_string());
         }
+        let incoming =
+            self.make_voice(track, true, plan.cue_in_sec.max(0.0), rate, preserve_pitch)?;
+        if !preserve_pitch {
+            incoming.sink.set_speed(rate as f32);
+        }
         self.cancel_transition();
         self.clear_preload();
-        let incoming = create_voice(&self.stream_handle, track, true, plan.cue_in_sec.max(0.0))?;
-        incoming.sink.set_speed(sanitize_rate(plan.rate) as f32);
         let event = TransitionStateEvent {
             status: "armed",
             progress: 0.0,
@@ -590,7 +880,7 @@ impl PlaybackActor {
             start_position: 0.0,
             duration: plan.duration_sec.max(0.05),
             start_at: plan.start_at_sec.max(0.0),
-            rate: sanitize_rate(plan.rate),
+            rate,
             from_id: event.from_id.clone(),
             to_id: event.to_id.clone(),
             to_title: event.to_title.clone(),
@@ -625,13 +915,23 @@ impl PlaybackActor {
     }
 
     fn switch_output(&mut self, requested: String) -> Result<(), String> {
-        if requested == self.output_device {
+        if requested == self.output_device && self.stream_handle.is_some() {
             return Ok(());
         }
-        let active_snapshot = self
-            .active
-            .as_ref()
-            .map(|voice| (voice.input.clone(), voice.position(), voice.playing()));
+
+        // Open the replacement before disturbing a working stream. If the
+        // selected device disappeared, playback continues and a later command
+        // can retry initialization.
+        let (stream, handle) = open_output_stream(&requested)?;
+        let active_snapshot = self.active.as_ref().map(|voice| {
+            (
+                voice.input.clone(),
+                voice.position(),
+                voice.playing(),
+                voice.playback_rate,
+                voice.preserve_pitch,
+            )
+        });
         let preload_snapshot = self
             .preloaded
             .as_ref()
@@ -641,27 +941,50 @@ impl PlaybackActor {
                     .map(|fade| fade.kind != FadeKind::Dj)
                     .unwrap_or(true)
             })
-            .map(|voice| (voice.input.clone(), voice.position()));
+            .map(|voice| {
+                (
+                    voice.input.clone(),
+                    voice.position(),
+                    voice.playback_rate,
+                    voice.preserve_pitch,
+                )
+            });
         self.cancel_transition();
         self.stop_voices();
-        let (stream, handle) = open_output_stream(&requested)?;
-        self._stream = stream;
-        self.stream_handle = handle;
+        self._stream = Some(stream);
+        self.stream_handle = Some(handle);
         self.output_device = requested;
-        if let Some((track, position, playing)) = active_snapshot {
-            self.active = Some(create_voice(
-                &self.stream_handle,
-                track,
-                !playing,
-                position,
-            )?);
+        if let Some((track, position, playing, rate, preserve_pitch)) = active_snapshot {
+            self.active = Some(self.make_voice(track, !playing, position, rate, preserve_pitch)?);
         }
-        if let Some((track, position)) = preload_snapshot {
-            self.preloaded = Some(create_voice(&self.stream_handle, track, true, position)?);
+        if let Some((track, position, rate, preserve_pitch)) = preload_snapshot {
+            self.preloaded = Some(self.make_voice(track, true, position, rate, preserve_pitch)?);
         }
         self.apply_levels();
         self.emit_state();
         Ok(())
+    }
+
+    fn handle_source_ended(&mut self, token: u64) {
+        if self.active.as_ref().map(|voice| voice.token) != Some(token) {
+            return;
+        }
+        if self.fade.is_some() {
+            self.complete_fade();
+            return;
+        }
+        if self.gapless && self.preloaded.is_some() {
+            // Completion is delivered from Rodio's render path, so promotion is
+            // no longer delayed by the actor's 20 ms polling interval. The two
+            // independently cancellable sinks can still incur backend buffer
+            // scheduling latency; sample-contiguous playback would require a
+            // shared queue that Rodio cannot selectively unqueue.
+            self.promote_preload("gapless");
+        } else if !self.ended_reported {
+            self.ended_reported = true;
+            let _ = self.app.emit("muro://track-ended", ());
+            self.emit_state();
+        }
     }
 
     fn tick(&mut self) {
@@ -681,19 +1004,15 @@ impl PlaybackActor {
         }
         self.tick_fade();
 
-        let ended = self
+        // Keep an empty-sink fallback for decoder/backend implementations that
+        // stop without pulling the source once more to observe `None`.
+        let ended_token = self
             .active
             .as_ref()
-            .map(|voice| voice.sink.empty())
-            .unwrap_or(false);
-        if ended && self.fade.is_none() {
-            if self.gapless && self.preloaded.is_some() {
-                self.promote_preload("gapless");
-            } else if !self.ended_reported {
-                self.ended_reported = true;
-                let _ = self.app.emit("muro://track-ended", ());
-                self.emit_state();
-            }
+            .filter(|voice| voice.sink.empty())
+            .map(|voice| voice.token);
+        if let Some(token) = ended_token {
+            self.handle_source_ended(token);
         }
     }
 
@@ -715,7 +1034,7 @@ impl PlaybackActor {
         self.fade = Some(FadeState {
             kind: FadeKind::Automatic,
             phase: FadePhase::Active,
-            start_position: active.position(),
+            start_position: active.rendered_position(),
             duration: self.crossfade_seconds.max(0.05),
             start_at: active.position(),
             rate: 1.0,
@@ -737,9 +1056,15 @@ impl PlaybackActor {
                 return;
             }
             fade.phase = FadePhase::Active;
-            fade.start_position = position;
+            fade.start_position = self
+                .active
+                .as_ref()
+                .map(Voice::rendered_position)
+                .unwrap_or(0.0);
             if let Some(incoming) = &self.preloaded {
-                incoming.sink.set_speed(fade.rate as f32);
+                if !incoming.preserve_pitch {
+                    incoming.sink.set_speed(fade.rate as f32);
+                }
                 incoming.sink.play();
             }
             fade.last_event = Instant::now() - POSITION_EVENT_INTERVAL;
@@ -750,7 +1075,7 @@ impl PlaybackActor {
         let elapsed = self
             .active
             .as_ref()
-            .map(|voice| (voice.position() - fade.start_position).max(0.0))
+            .map(|voice| (voice.rendered_position() - fade.start_position).max(0.0))
             .unwrap_or(0.0);
         let progress = transition_progress(elapsed, fade.duration);
         let (outgoing, incoming) = fade_gains(progress);
@@ -881,11 +1206,13 @@ impl PlaybackActor {
                 (&mut self.media_controls, state.current_track.as_ref())
             {
                 let duration = media_duration(state.duration);
+                let cover_url = validated_cover_art_url(track);
                 let metadata = MediaMetadata {
                     title: Some(&track.title),
                     artist: Some(&track.artist),
                     album: Some(&track.album),
                     duration,
+                    cover_url: cover_url.as_deref(),
                     ..Default::default()
                 };
                 if let Err(error) = controls.set_metadata(metadata) {
@@ -934,6 +1261,54 @@ impl PlaybackActor {
         self.fade = None;
         self.ended_reported = false;
     }
+}
+
+fn validated_cover_art_url(track: &NativeCurrentTrack) -> Option<String> {
+    [
+        track.cover_art_thumb_path.as_deref(),
+        track.cover_art_path.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(validated_local_cover_url)
+}
+
+fn validated_local_cover_url(value: &str) -> Option<String> {
+    let path = if value.to_ascii_lowercase().starts_with("file:") {
+        url::Url::parse(value).ok()?.to_file_path().ok()?
+    } else {
+        PathBuf::from(value)
+    };
+    if !path.is_absolute() {
+        return None;
+    }
+    let canonical = path.canonicalize().ok()?;
+    if !canonical.is_file() || !is_supported_cover_path(&canonical) {
+        return None;
+    }
+
+    #[cfg(windows)]
+    {
+        // Souvlaki's Windows backend strips the literal file URL prefix and
+        // passes the remainder to StorageFile::GetFileFromPathAsync.
+        Some(format!("file://{}", canonical.to_string_lossy()))
+    }
+    #[cfg(not(windows))]
+    {
+        url::Url::from_file_path(canonical)
+            .ok()
+            .map(|url| url.to_string())
+    }
+}
+
+fn is_supported_cover_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase())
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp")
+    )
 }
 
 fn init_media_controls(
@@ -1025,6 +1400,11 @@ fn create_voice(
     mut input: PlaybackTrackInput,
     paused: bool,
     start_position: f64,
+    playback_rate: f64,
+    preserve_pitch: bool,
+    seek_mode: Arc<AtomicU8>,
+    actor_tx: Sender<ActorCommand>,
+    token: u64,
 ) -> Result<Voice, String> {
     let path = Path::new(&input.source_path);
     if !path.is_absolute() || !path.is_file() {
@@ -1042,15 +1422,40 @@ fn create_voice(
     if paused {
         sink.pause();
     }
-    sink.append(decoder);
+    let use_wsola = preserve_pitch && (playback_rate - 1.0).abs() > f64::EPSILON;
+    if use_wsola {
+        let stretched = WsolaSource::new(decoder, playback_rate as f32)?;
+        sink.append(EndNotifyingSource {
+            inner: stretched,
+            actor_tx,
+            token,
+            notified: false,
+        });
+    } else {
+        sink.append(EndNotifyingSource {
+            inner: decoder,
+            actor_tx,
+            token,
+            notified: false,
+        });
+    }
+    if !preserve_pitch {
+        sink.set_speed(playback_rate as f32);
+    }
     if start_position > 0.0 {
-        sink.try_seek(Duration::from_secs_f64(start_position.min(duration)))
+        let requested = start_position.min(duration);
+        let target = SeekModePreference::load(&seek_mode).seek_target(requested);
+        let rendered_target = target / playback_rate.max(f64::EPSILON);
+        sink.try_seek(Duration::from_secs_f64(rendered_target))
             .map_err(|error| format!("Could not seek prepared track: {error}"))?;
     }
     Ok(Voice {
+        token,
         input,
         sink,
         duration,
+        playback_rate,
+        preserve_pitch,
     })
 }
 
@@ -1060,15 +1465,20 @@ fn open_output_stream(device_id: &str) -> Result<(OutputStream, OutputStreamHand
     }
     let host = rodio::cpal::default_host();
     let devices = host.output_devices().map_err(|error| error.to_string())?;
-    for (index, device) in devices.enumerate() {
-        let name = device
-            .name()
-            .unwrap_or_else(|_| format!("Audio device {}", index + 1));
-        if device_id == name || device_id == stable_device_id(index, &name) {
-            return OutputStream::try_from_device(&device).map_err(|error| error.to_string());
-        }
-    }
-    Err("The selected audio output is unavailable; choose the system default".to_string())
+    let devices: Vec<_> = devices
+        .enumerate()
+        .map(|(index, device)| {
+            let label = device
+                .name()
+                .unwrap_or_else(|_| format!("Audio device {}", index + 1));
+            (device, label)
+        })
+        .collect();
+    let labels: Vec<_> = devices.iter().map(|(_, label)| label.clone()).collect();
+    let selected = select_output_device_index(device_id, &labels).ok_or_else(|| {
+        "The selected audio output is unavailable; choose the system default".to_string()
+    })?;
+    OutputStream::try_from_device(&devices[selected].0).map_err(|error| error.to_string())
 }
 
 fn list_output_devices() -> Result<Vec<NativeAudioOutputDevice>, String> {
@@ -1092,6 +1502,36 @@ fn list_output_devices() -> Result<Vec<NativeAudioOutputDevice>, String> {
 
 fn stable_device_id(index: usize, name: &str) -> String {
     format!("cpal:{index}:{name}")
+}
+
+fn parse_stable_device_id(value: &str) -> Option<(usize, &str)> {
+    let mut parts = value.splitn(3, ':');
+    if parts.next()? != "cpal" {
+        return None;
+    }
+    let index = parts.next()?.parse().ok()?;
+    let label = parts.next()?;
+    (!label.is_empty()).then_some((index, label))
+}
+
+fn select_output_device_index(requested: &str, labels: &[String]) -> Option<usize> {
+    if let Some(exact) = labels
+        .iter()
+        .enumerate()
+        .find_map(|(index, label)| (stable_device_id(index, label) == requested).then_some(index))
+    {
+        return Some(exact);
+    }
+
+    let fallback_label = parse_stable_device_id(requested)
+        .map(|(_, label)| label)
+        .unwrap_or(requested);
+    let mut matches = labels
+        .iter()
+        .enumerate()
+        .filter_map(|(index, label)| (label == fallback_label).then_some(index));
+    let selected = matches.next()?;
+    matches.next().is_none().then_some(selected)
 }
 
 fn sanitize_gain(value: f64) -> f64 {
@@ -1333,6 +1773,48 @@ pub fn playback_cancel_transition(service: State<'_, NativePlaybackService>) -> 
 mod tests {
     use super::*;
 
+    fn sine_pcm(frames: usize, channels: u16, sample_rate: u32) -> Vec<i16> {
+        let mut samples = Vec::with_capacity(frames * usize::from(channels));
+        for frame in 0..frames {
+            let phase = frame as f32 * 440.0 * std::f32::consts::TAU / sample_rate as f32;
+            let sample = (phase.sin() * 12_000.0) as i16;
+            samples.extend(std::iter::repeat_n(sample, usize::from(channels)));
+        }
+        samples
+    }
+
+    #[test]
+    fn wsola_source_is_aligned_shorter_and_seekable() {
+        let channels = 2;
+        let sample_rate = 8_000;
+        let input = sine_pcm(sample_rate as usize, channels, sample_rate);
+        let input_len = input.len();
+        let source = rodio::buffer::SamplesBuffer::new(channels, sample_rate, input);
+        let mut stretched = WsolaSource::new(source, 2.0).expect("valid WSOLA source");
+
+        let duration = stretched.total_duration().expect("known duration");
+        assert!((duration.as_secs_f64() - 0.5).abs() < 0.001);
+        let output: Vec<_> = stretched.by_ref().collect();
+        assert!(!output.is_empty());
+        assert_eq!(output.len() % usize::from(channels), 0);
+        assert!(output.len() < input_len);
+
+        stretched
+            .try_seek(Duration::from_millis(200))
+            .expect("seek resets upstream and WSOLA state");
+        assert_eq!(stretched.take(128).count(), 128);
+    }
+
+    #[test]
+    fn wsola_source_preserves_clips_shorter_than_one_window() {
+        let input = sine_pcm(100, 1, 8_000);
+        let source = rodio::buffer::SamplesBuffer::new(1, 8_000, input.clone());
+        let output: Vec<_> = WsolaSource::new(source, 1.5)
+            .expect("valid WSOLA source")
+            .collect();
+        assert_eq!(output.len(), input.len());
+    }
+
     #[test]
     fn transition_progress_is_bounded() {
         assert_eq!(transition_progress(-1.0, 8.0), 0.0);
@@ -1357,6 +1839,52 @@ mod tests {
         assert_eq!(sanitize_rate(4.0), 2.0);
         assert_eq!(sanitize_seconds(f64::NAN, 0.0, 30.0), 0.0);
         assert_eq!(sanitize_seconds(40.0, 0.0, 30.0), 30.0);
+    }
+
+    #[test]
+    fn fast_and_accurate_seek_modes_resolve_different_targets() {
+        assert_eq!(SeekModePreference::Fast.seek_target(1.234), 1.0);
+        assert_eq!(SeekModePreference::Accurate.seek_target(1.234), 1.234);
+    }
+
+    #[test]
+    fn cover_art_validation_accepts_images_only() {
+        assert!(is_supported_cover_path(Path::new("cover.JPG")));
+        assert!(is_supported_cover_path(Path::new("cover.webp")));
+        assert!(!is_supported_cover_path(Path::new("cover.svg")));
+        assert!(!is_supported_cover_path(Path::new("cover.exe")));
+        assert!(validated_local_cover_url("relative/cover.jpg").is_none());
+        assert!(validated_local_cover_url("https://example.com/cover.jpg").is_none());
+    }
+
+    #[test]
+    fn saved_device_falls_back_by_unambiguous_exact_label() {
+        let labels = vec!["Built-in Output".to_string(), "USB: Studio DAC".to_string()];
+        assert_eq!(
+            parse_stable_device_id("cpal:9:USB: Studio DAC"),
+            Some((9, "USB: Studio DAC"))
+        );
+        assert_eq!(
+            select_output_device_index("cpal:9:USB: Studio DAC", &labels),
+            Some(1)
+        );
+        assert_eq!(
+            select_output_device_index("USB: Studio DAC", &labels),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn saved_device_label_fallback_rejects_ambiguity_but_exact_id_wins() {
+        let labels = vec!["Studio DAC".to_string(), "Studio DAC".to_string()];
+        assert_eq!(
+            select_output_device_index("cpal:7:Studio DAC", &labels),
+            None
+        );
+        assert_eq!(
+            select_output_device_index("cpal:1:Studio DAC", &labels),
+            Some(1)
+        );
     }
 
     #[test]

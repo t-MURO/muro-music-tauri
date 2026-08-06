@@ -44,3 +44,4 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 native-tls = "0.2"
 tokio = { version = "1", features = ["sync", "time"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+wsola = "0.1.0"
