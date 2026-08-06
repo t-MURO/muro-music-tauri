@@ -8,6 +8,7 @@ pub mod history_stats;
 pub mod library_ops;
 pub mod metadata_core;
 pub mod metadata_online;
+pub mod metadata_write;
 pub mod native_playback;
 pub mod playlist_files;
 pub mod playlists;

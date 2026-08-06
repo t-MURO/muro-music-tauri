@@ -716,7 +716,6 @@ fn refresh_search_text(conn: &Connection, track_id: &str) -> Result<(), String> 
     Ok(())
 }
 
-#[tauri::command(rename_all = "camelCase")]
 pub fn rollback_metadata_change(
     db_path: String,
     history_id: i64,
