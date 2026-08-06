@@ -1206,7 +1206,7 @@ mod tests {
         .unwrap();
         let history_id = conn.last_insert_rowid();
         drop(conn);
-        let result = rollback_metadata_change(
+        let result = rollback_metadata_change_impl(
             path.to_string_lossy().into_owned(),
             history_id,
             "title".to_string(),
