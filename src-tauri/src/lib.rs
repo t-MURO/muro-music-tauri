@@ -155,6 +155,9 @@ pub fn run() {
                 parity::native_playback::NativePlaybackService::new(app.handle().clone())?;
             let playback_shutdown = native_playback.clone();
             app.manage(native_playback);
+            app.manage(parity::native_analysis::NativeAnalysisService::new(
+                app.handle().clone(),
+            ));
             let artist_cache = app
                 .path()
                 .app_data_dir()
@@ -306,6 +309,11 @@ pub fn run() {
             parity::metadata_online::cache_album_cover_candidate,
             parity::backup::create_library_backup,
             parity::backup::restore_library_backup,
+            parity::native_analysis::keyfinder_health,
+            parity::native_analysis::start_track_analysis,
+            parity::native_analysis::cancel_track_analysis,
+            parity::native_analysis::recycle_keyfinder,
+            parity::native_analysis::identify_track_acoustid,
             parity::waveform::generate_track_waveform,
             parity::media_protocol::authorize_local_media,
             parity::media_protocol::revoke_local_media,
