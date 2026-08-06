@@ -826,6 +826,15 @@ pub fn run() {
             // Initialize audio player with app handle
             audio_player.init(app.handle().clone());
 
+            let cover_cache = app
+                .path()
+                .app_cache_dir()
+                .map_err(|error| error.to_string())?
+                .join(COVERS_DIR);
+            app.manage(parity::metadata_online::MetadataOnlineState::new(
+                cover_cache,
+            )?);
+
             let window = app
                 .get_webview_window("main")
                 .ok_or_else(|| "No main window found to enable drag drop.")?;
@@ -930,7 +939,15 @@ pub fn run() {
             show_item_in_folder,
             parity::watched_folder::set_watched_folder,
             parity::watched_folder::scan_watched_folder,
-            parity::watched_folder::watched_folder_status
+            parity::watched_folder::watched_folder_status,
+            parity::metadata_online::search_track_metadata,
+            parity::metadata_online::search_album_metadata,
+            parity::metadata_online::load_album_metadata,
+            parity::metadata_online::fetch_track_cover_art,
+            parity::metadata_online::search_album_cover_images,
+            parity::metadata_online::cache_album_cover_candidate,
+            parity::backup::create_library_backup,
+            parity::backup::restore_library_backup
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
