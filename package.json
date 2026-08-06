@@ -13,6 +13,8 @@
     "dev": "vite",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "npm run typecheck && vite build",
+    "prepare:native-sidecars": "node scripts/prepare-native-sidecars.cjs",
+    "build:tauri": "npm run prepare:native-sidecars && npm run build",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
