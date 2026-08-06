@@ -187,7 +187,6 @@ fn update_track_analysis(
     Ok(())
 }
 
-#[tauri::command(rename_all = "camelCase")]
 fn record_track_play(db_path: String, track_id: String) -> Result<(), String> {
     if !Path::new(&db_path).exists() {
         return Err("Database not found".to_string());
@@ -822,6 +821,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(audio_player.clone())
+        .manage(parity::watched_folder::WatchedFolderService::new())
         .setup(move |app| {
             // Initialize audio player with app handle
             audio_player.init(app.handle().clone());
@@ -892,6 +892,10 @@ pub fn run() {
             parity::commands::list_playlist_snapshots,
             parity::commands::restore_playlist_snapshot,
             parity::commands::delete_playlist_snapshot,
+            parity::playlist_files::list_playlist_files,
+            parity::playlist_files::import_playlist_file,
+            parity::playlist_files::export_playlist_file,
+            parity::playlist_files::export_all_playlists,
             parity::commands::rebuild_search_index,
             parity::database::search_tracks,
             parity::database::migrate_artist_credits,
@@ -909,12 +913,24 @@ pub fn run() {
             update_track_analysis,
             update_track_metadata,
             cache_cover_art_from_file,
-            record_track_play,
+            parity::history_stats::record_track_play,
+            parity::history_stats::update_play_history,
+            parity::history_stats::load_listening_statistics,
+            parity::metadata_core::update_track_beat_grid,
+            parity::metadata_core::scan_technical_metadata,
+            parity::metadata_core::list_tracks_needing_loudness,
+            parity::metadata_core::update_track_loudness,
+            parity::metadata_core::recompute_album_gain,
+            parity::metadata_core::list_metadata_history,
+            parity::metadata_core::rollback_metadata_change,
             clipboard_has_image,
             cache_clipboard_cover_art,
             copy_image_to_clipboard,
             open_external,
-            show_item_in_folder
+            show_item_in_folder,
+            parity::watched_folder::set_watched_folder,
+            parity::watched_folder::scan_watched_folder,
+            parity::watched_folder::watched_folder_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
