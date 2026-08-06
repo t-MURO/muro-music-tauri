@@ -1,4 +1,4 @@
-import { convertFileSrc, invoke } from "@muro/desktop/runtime";
+import { invoke, withAuthorizedLocalMedia } from "@muro/desktop/runtime";
 import { REFERENCE_LUFS, replayGainFromLoudness, type LoudnessResult } from "./r128";
 
 type WorkerReply =
@@ -58,13 +58,15 @@ const decodeAndMeasure = async (
   sourcePath: string,
   referenceLufs: number
 ): Promise<TrackLoudness> => {
-  const response = await fetch(convertFileSrc(sourcePath));
-  if (!response.ok) {
-    throw new Error(
-      `Could not read audio file for loudness analysis (HTTP ${response.status}): ${sourcePath}`
-    );
-  }
-  const encoded = await response.arrayBuffer();
+  const encoded = await withAuthorizedLocalMedia(sourcePath, async (url) => {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(
+        `Could not read audio file for loudness analysis (HTTP ${response.status}): ${sourcePath}`
+      );
+    }
+    return response.arrayBuffer();
+  });
   // Decode at the file's own rate: BS.1770 filters are derived per sample rate
   // and resampling first would only add error.
   const context = new OfflineAudioContext(1, 1, 48_000);

@@ -1,4 +1,4 @@
-import { convertFileSrc, invoke } from "@muro/desktop/runtime";
+import { invoke, withAuthorizedLocalMedia } from "@muro/desktop/runtime";
 import type { Track } from "../../types";
 import { BEAT_GRID_VERSION, type BeatGrid } from "./types";
 
@@ -55,11 +55,13 @@ const decodeAndAnalyze = async (
   sourcePath: string,
   bpmHint: number | null,
 ): Promise<BeatGrid> => {
-  const response = await fetch(convertFileSrc(sourcePath));
-  if (!response.ok) {
-    throw new Error(`Could not read audio file for beat analysis (HTTP ${response.status}): ${sourcePath}`);
-  }
-  const encoded = await response.arrayBuffer();
+  const encoded = await withAuthorizedLocalMedia(sourcePath, async (url) => {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Could not read audio file for beat analysis (HTTP ${response.status}): ${sourcePath}`);
+    }
+    return response.arrayBuffer();
+  });
   // OfflineAudioContext decodes AND resamples to the analysis rate in one go.
   const context = new OfflineAudioContext(1, 1, ANALYSIS_SAMPLE_RATE);
   let decoded: AudioBuffer;

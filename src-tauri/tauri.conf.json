@@ -24,10 +24,10 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self' customprotocol: asset:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:* http://localhost:1420 ws://localhost:1420; img-src 'self' asset: http://asset.localhost data: blob: https: http://127.0.0.1:*; media-src 'self' asset: http://asset.localhost blob: http://127.0.0.1:*; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPCACHE/**", "$APPDATA/**", "**"]
+        "scope": ["$APPCACHE/**", "$APPDATA/**"]
       }
     }
   },

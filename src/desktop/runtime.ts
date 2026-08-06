@@ -27,6 +27,27 @@ export const invoke = <T>(
   throw cleanRemoteError(error);
 });
 
+type AuthorizedLocalMedia = {
+  url: string;
+  expiresInSeconds: number;
+};
+
+/**
+ * Grant one exact canonical file to a callback, then revoke its unguessable
+ * loopback capability as soon as the response body has been consumed.
+ */
+export const withAuthorizedLocalMedia = async <T>(
+  filePath: string,
+  callback: (url: string) => Promise<T>,
+): Promise<T> => {
+  const grant = await invoke<AuthorizedLocalMedia>("authorize_local_media", { filePath });
+  try {
+    return await callback(grant.url);
+  } finally {
+    await invoke<boolean>("revoke_local_media", { urlOrToken: grant.url })
+      .catch(() => false);
+  }
+};
 export const convertFileSrc = (filePath: string): string => tauriConvertFileSrc(filePath);
 
 export const startFileDrag = (filePaths: string[]): void => {

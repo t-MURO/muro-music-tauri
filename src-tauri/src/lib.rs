@@ -361,6 +361,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(parity::watched_folder::WatchedFolderService::new())
+        .manage(parity::media_protocol::MediaProtocolService::default())
         .setup(move |app| {
             let native_playback =
                 parity::native_playback::NativePlaybackService::new(app.handle().clone())?;
@@ -504,7 +505,9 @@ pub fn run() {
             parity::metadata_online::cache_album_cover_candidate,
             parity::backup::create_library_backup,
             parity::backup::restore_library_backup,
-            parity::waveform::generate_track_waveform
+            parity::waveform::generate_track_waveform,
+            parity::media_protocol::authorize_local_media,
+            parity::media_protocol::revoke_local_media
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
