@@ -6,6 +6,7 @@ pub mod commands;
 pub mod database;
 pub mod desktop;
 pub mod history_stats;
+pub mod library_exports;
 pub mod library_ops;
 pub mod media_protocol;
 pub mod metadata_core;

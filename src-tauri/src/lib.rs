@@ -148,6 +148,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(parity::watched_folder::WatchedFolderService::new())
+        .manage(parity::library_exports::PlaylistSyncService::new())
         .manage(parity::media_protocol::MediaProtocolService::default())
         .setup(move |app| {
             let native_playback =
@@ -247,6 +248,10 @@ pub fn run() {
             parity::playlist_files::import_playlist_file,
             parity::playlist_files::export_playlist_file,
             parity::playlist_files::export_all_playlists,
+            parity::library_exports::export_itunes_library,
+            parity::library_exports::export_organized_library,
+            parity::library_exports::configure_playlist_sync,
+            parity::library_exports::sync_playlist_source,
             parity::commands::rebuild_search_index,
             parity::database::search_tracks,
             parity::database::migrate_artist_credits,
