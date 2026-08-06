@@ -233,35 +233,39 @@ fn decode_envelope(path: &Path) -> Result<Vec<f32>, String> {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn generate_track_waveform(
+pub async fn generate_track_waveform(
     app: tauri::AppHandle,
     source_path: String,
     points: Option<usize>,
 ) -> Result<WaveformResult, String> {
-    let source = PathBuf::from(source_path);
-    let points = normalize_points(points);
-    let (source_size, source_mtime_ms) = source_metadata(&source)?;
-    let cache_dir = app
-        .path()
-        .app_cache_dir()
-        .map_err(|error| format!("Could not resolve waveform cache: {error}"))?
-        .join("waveforms");
-    let cache_path = cache_dir.join(format!("{}-{points}.json", source_key(&source)));
-    if let Some(peaks) = read_cache(&cache_path, source_size, source_mtime_ms, points) {
-        return Ok(WaveformResult { peaks });
-    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let source = PathBuf::from(source_path);
+        let points = normalize_points(points);
+        let (source_size, source_mtime_ms) = source_metadata(&source)?;
+        let cache_dir = app
+            .path()
+            .app_cache_dir()
+            .map_err(|error| format!("Could not resolve waveform cache: {error}"))?
+            .join("waveforms");
+        let cache_path = cache_dir.join(format!("{}-{points}.json", source_key(&source)));
+        if let Some(peaks) = read_cache(&cache_path, source_size, source_mtime_ms, points) {
+            return Ok(WaveformResult { peaks });
+        }
 
-    let peaks = resize_envelope(&decode_envelope(&source)?, points);
-    let record = CacheRecord {
-        version: CACHE_VERSION,
-        points,
-        source_size,
-        source_mtime_ms,
-        peaks: peaks.clone(),
-    };
-    // A cache failure must not make an otherwise valid waveform unusable.
-    let _ = write_cache(&cache_path, &record);
-    Ok(WaveformResult { peaks })
+        let peaks = resize_envelope(&decode_envelope(&source)?, points);
+        let record = CacheRecord {
+            version: CACHE_VERSION,
+            points,
+            source_size,
+            source_mtime_ms,
+            peaks: peaks.clone(),
+        };
+        // A cache failure must not make an otherwise valid waveform unusable.
+        let _ = write_cache(&cache_path, &record);
+        Ok(WaveformResult { peaks })
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[cfg(test)]

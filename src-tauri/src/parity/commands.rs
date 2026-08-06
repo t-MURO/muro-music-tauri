@@ -3,7 +3,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn import_files(
+pub async fn import_files(
     app: AppHandle,
     paths: Vec<String>,
     db_path: String,
@@ -14,31 +14,38 @@ pub fn import_files(
         .app_cache_dir()
         .map_err(|error| error.to_string())?
         .join("covers");
-    let event_app = app.clone();
-    library_ops::import_files_with_progress(
-        paths,
-        &db_path,
-        &cache_dir,
-        library_folder.as_deref(),
-        move |progress| {
-            let _ = event_app.emit("muro://import-progress", progress);
-        },
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        library_ops::import_files_with_progress(
+            paths,
+            &db_path,
+            &cache_dir,
+            library_folder.as_deref(),
+            move |progress| {
+                let _ = app.emit("muro://import-progress", progress);
+            },
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn accept_tracks(
+pub async fn accept_tracks(
     db_path: String,
     track_ids: Vec<String>,
     organize: Option<bool>,
     library_folder: Option<String>,
 ) -> Result<library_ops::AcceptTracksResult, String> {
-    library_ops::accept_tracks(
-        &db_path,
-        track_ids,
-        organize.unwrap_or(false),
-        library_folder.as_deref(),
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        library_ops::accept_tracks(
+            &db_path,
+            track_ids,
+            organize.unwrap_or(false),
+            library_folder.as_deref(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -52,34 +59,50 @@ pub fn reject_tracks(db_path: String, track_ids: Vec<String>) -> Result<usize, S
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn delete_tracks(
+pub async fn delete_tracks(
     db_path: String,
     track_ids: Vec<String>,
     delete_from_disk: bool,
 ) -> Result<library_ops::DeleteTracksResult, String> {
-    library_ops::delete_tracks(&db_path, track_ids, delete_from_disk)
+    tauri::async_runtime::spawn_blocking(move || {
+        library_ops::delete_tracks(&db_path, track_ids, delete_from_disk)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn validate_library_structure(
+pub async fn validate_library_structure(
     db_path: String,
     library_root: Option<String>,
 ) -> Result<library_ops::ValidateStructureResult, String> {
-    library_ops::validate_library_structure(&db_path, library_root.as_deref())
+    tauri::async_runtime::spawn_blocking(move || {
+        library_ops::validate_library_structure(&db_path, library_root.as_deref())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn repair_library_structure(
+pub async fn repair_library_structure(
     db_path: String,
     library_root: Option<String>,
     track_ids: Vec<String>,
 ) -> Result<library_ops::RepairStructureResult, String> {
-    library_ops::repair_library_structure(&db_path, library_root.as_deref(), track_ids)
+    tauri::async_runtime::spawn_blocking(move || {
+        library_ops::repair_library_structure(&db_path, library_root.as_deref(), track_ids)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn verify_library_files(db_path: String) -> Result<library_ops::VerifyLibraryResult, String> {
-    library_ops::verify_library_files(&db_path)
+pub async fn verify_library_files(
+    db_path: String,
+) -> Result<library_ops::VerifyLibraryResult, String> {
+    tauri::async_runtime::spawn_blocking(move || library_ops::verify_library_files(&db_path))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -97,12 +120,16 @@ pub fn relink_track(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn auto_relink_missing(
+pub async fn auto_relink_missing(
     db_path: String,
     search_dir: String,
     dry_run: bool,
 ) -> Result<library_ops::AutoRelinkResult, String> {
-    library_ops::auto_relink_missing(&db_path, &search_dir, dry_run)
+    tauri::async_runtime::spawn_blocking(move || {
+        library_ops::auto_relink_missing(&db_path, &search_dir, dry_run)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command(rename_all = "camelCase")]

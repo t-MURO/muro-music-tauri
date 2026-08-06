@@ -1048,16 +1048,19 @@ fn update_impl(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn update_track_metadata(
+pub async fn update_track_metadata(
     db_path: String,
     track_ids: Vec<String>,
     updates: HashMap<String, Value>,
 ) -> Result<MetadataWriteResult, String> {
-    update_impl(&db_path, track_ids, updates.into_iter().collect(), "user")
+    tauri::async_runtime::spawn_blocking(move || {
+        update_impl(&db_path, track_ids, updates.into_iter().collect(), "user")
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
-#[tauri::command(rename_all = "camelCase")]
-pub fn rollback_metadata_change(
+fn rollback_metadata_change_impl(
     db_path: String,
     history_id: i64,
     field: String,
@@ -1100,6 +1103,19 @@ pub fn rollback_metadata_change(
     }
     drop(conn);
     update_impl(&db_path, vec![track_id], updates, "rollback")
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn rollback_metadata_change(
+    db_path: String,
+    history_id: i64,
+    field: String,
+) -> Result<MetadataWriteResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        rollback_metadata_change_impl(db_path, history_id, field)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[cfg(test)]
