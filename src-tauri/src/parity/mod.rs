@@ -1,5 +1,6 @@
 //! Native parity modules shared by the Tauri command layer.
 
+pub mod artist_profiles;
 pub mod backup;
 pub mod commands;
 pub mod database;

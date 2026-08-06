@@ -367,6 +367,14 @@ pub fn run() {
                 parity::native_playback::NativePlaybackService::new(app.handle().clone())?;
             let playback_shutdown = native_playback.clone();
             app.manage(native_playback);
+            let artist_cache = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| error.to_string())?
+                .join("artists");
+            app.manage(parity::artist_profiles::ArtistProfileState::new(
+                artist_cache,
+            )?);
 
             let cover_cache = app
                 .path()
@@ -507,7 +515,12 @@ pub fn run() {
             parity::backup::restore_library_backup,
             parity::waveform::generate_track_waveform,
             parity::media_protocol::authorize_local_media,
-            parity::media_protocol::revoke_local_media
+            parity::media_protocol::revoke_local_media,
+            parity::artist_profiles::load_cached_artist_profiles,
+            parity::artist_profiles::get_artist_profile,
+            parity::artist_profiles::search_artist_images,
+            parity::artist_profiles::set_artist_image,
+            parity::artist_profiles::scan_artist_profiles
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
