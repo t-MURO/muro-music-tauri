@@ -2,7 +2,6 @@ pub mod backfill;
 pub mod cover_art;
 pub mod import;
 pub mod parity;
-pub mod playback;
 pub mod search;
 
 use lofty::config::WriteOptions;
@@ -11,14 +10,12 @@ use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::prelude::*;
 use lofty::probe::Probe;
 use lofty::tag::{ItemKey, ItemValue, Tag, TagItem, TagType};
-use playback::{AudioPlayer, CurrentTrack, PlaybackState, SeekModePreference};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{Emitter, Manager, State, WindowEvent};
+use tauri::{Emitter, Manager, WindowEvent};
 
 // Constants for import status values
 const STATUS_STAGED: &str = "staged";
@@ -76,77 +73,6 @@ fn backfill_cover_art(app: tauri::AppHandle, db_path: String) -> Result<usize, S
         .map_err(|e| e.to_string())?
         .join(COVERS_DIR);
     backfill::run_cover_art_backfill(&db_path, &cache_dir)
-}
-
-// Playback commands
-#[tauri::command]
-fn playback_play_file(
-    player: State<'_, Arc<AudioPlayer>>,
-    id: String,
-    title: String,
-    artist: String,
-    album: String,
-    source_path: String,
-    duration_hint: f64,
-    cover_art_path: Option<String>,
-    cover_art_thumb_path: Option<String>,
-) -> Result<(), String> {
-    let track = CurrentTrack {
-        id,
-        title,
-        artist,
-        album,
-        source_path,
-        cover_art_path,
-        cover_art_thumb_path,
-    };
-    player.play_file(track, duration_hint)
-}
-
-#[tauri::command]
-fn playback_toggle(player: State<'_, Arc<AudioPlayer>>) -> bool {
-    player.toggle_play()
-}
-
-#[tauri::command]
-fn playback_play(player: State<'_, Arc<AudioPlayer>>) {
-    player.play();
-}
-
-#[tauri::command]
-fn playback_pause(player: State<'_, Arc<AudioPlayer>>) {
-    player.pause();
-}
-
-#[tauri::command]
-fn playback_stop(player: State<'_, Arc<AudioPlayer>>) {
-    player.stop();
-}
-
-#[tauri::command]
-fn playback_seek(player: State<'_, Arc<AudioPlayer>>, position_secs: f64) -> Result<(), String> {
-    player.seek(position_secs)
-}
-
-#[tauri::command]
-fn playback_set_volume(player: State<'_, Arc<AudioPlayer>>, volume: f64) {
-    player.set_volume(volume);
-}
-
-#[tauri::command]
-fn playback_set_seek_mode(player: State<'_, Arc<AudioPlayer>>, mode: String) {
-    let preference = SeekModePreference::from_str(&mode);
-    player.set_seek_mode(preference);
-}
-
-#[tauri::command]
-fn playback_get_state(player: State<'_, Arc<AudioPlayer>>) -> PlaybackState {
-    player.get_state()
-}
-
-#[tauri::command]
-fn playback_is_finished(player: State<'_, Arc<AudioPlayer>>) -> bool {
-    player.is_finished()
 }
 
 #[tauri::command]
@@ -815,16 +741,15 @@ fn emit_drag_event(window: &tauri::WebviewWindow, kind: &'static str, paths: Vec
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let audio_player = Arc::new(AudioPlayer::new());
-
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .manage(audio_player.clone())
         .manage(parity::watched_folder::WatchedFolderService::new())
         .setup(move |app| {
-            // Initialize audio player with app handle
-            audio_player.init(app.handle().clone());
+            let native_playback =
+                parity::native_playback::NativePlaybackService::new(app.handle().clone())?;
+            let playback_shutdown = native_playback.clone();
+            app.manage(native_playback);
 
             let cover_cache = app
                 .path()
@@ -841,6 +766,11 @@ pub fn run() {
             let window_for_events = window.clone();
 
             window.on_window_event(move |event| {
+                if matches!(event, WindowEvent::Destroyed) {
+                    playback_shutdown.shutdown();
+                    return;
+                }
+
                 let WindowEvent::DragDrop(drag_event) = event else {
                     return;
                 };
@@ -908,16 +838,26 @@ pub fn run() {
             parity::commands::rebuild_search_index,
             parity::database::search_tracks,
             parity::database::migrate_artist_credits,
-            playback_play_file,
-            playback_toggle,
-            playback_play,
-            playback_pause,
-            playback_stop,
-            playback_seek,
-            playback_set_volume,
-            playback_set_seek_mode,
-            playback_get_state,
-            playback_is_finished,
+            parity::native_playback::playback_play_file,
+            parity::native_playback::playback_preload_next,
+            parity::native_playback::playback_clear_preload,
+            parity::native_playback::playback_set_gapless,
+            parity::native_playback::playback_set_crossfade,
+            parity::native_playback::playback_set_track_gain,
+            parity::native_playback::playback_toggle,
+            parity::native_playback::playback_play,
+            parity::native_playback::playback_pause,
+            parity::native_playback::playback_stop,
+            parity::native_playback::playback_seek,
+            parity::native_playback::playback_set_volume,
+            parity::native_playback::playback_set_seek_mode,
+            parity::native_playback::playback_set_output_device,
+            parity::native_playback::playback_get_output_device,
+            parity::native_playback::playback_list_output_devices,
+            parity::native_playback::playback_get_state,
+            parity::native_playback::playback_is_finished,
+            parity::native_playback::playback_transition_to,
+            parity::native_playback::playback_cancel_transition,
             get_track_source_path,
             update_track_analysis,
             update_track_metadata,
@@ -947,7 +887,8 @@ pub fn run() {
             parity::metadata_online::search_album_cover_images,
             parity::metadata_online::cache_album_cover_candidate,
             parity::backup::create_library_backup,
-            parity::backup::restore_library_backup
+            parity::backup::restore_library_backup,
+            parity::waveform::generate_track_waveform
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
