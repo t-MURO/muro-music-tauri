@@ -155,6 +155,9 @@ pub fn run() {
                 parity::native_playback::NativePlaybackService::new(app.handle().clone())?;
             let playback_shutdown = native_playback.clone();
             app.manage(native_playback);
+            let remote_output = parity::remote::RemoteOutputService::new(app.handle().clone());
+            let remote_shutdown = remote_output.clone();
+            app.manage(remote_output);
             app.manage(parity::native_analysis::NativeAnalysisService::new(
                 app.handle().clone(),
             ));
@@ -184,6 +187,7 @@ pub fn run() {
             window.on_window_event(move |event| {
                 if matches!(event, WindowEvent::Destroyed) {
                     playback_shutdown.shutdown();
+                    remote_shutdown.shutdown();
                     return;
                 }
 
@@ -278,6 +282,28 @@ pub fn run() {
             parity::native_playback::playback_is_finished,
             parity::native_playback::playback_transition_to,
             parity::native_playback::playback_cancel_transition,
+            parity::remote::cast_start_discovery,
+            parity::remote::cast_stop_discovery,
+            parity::remote::cast_get_devices,
+            parity::remote::cast_connect,
+            parity::remote::cast_disconnect,
+            parity::remote::cast_load_track,
+            parity::remote::cast_play,
+            parity::remote::cast_pause,
+            parity::remote::cast_seek,
+            parity::remote::cast_set_volume,
+            parity::remote::cast_get_state,
+            parity::remote::dlna_start_discovery,
+            parity::remote::dlna_stop_discovery,
+            parity::remote::dlna_get_devices,
+            parity::remote::dlna_connect,
+            parity::remote::dlna_disconnect,
+            parity::remote::dlna_load_track,
+            parity::remote::dlna_play,
+            parity::remote::dlna_pause,
+            parity::remote::dlna_seek,
+            parity::remote::dlna_set_volume,
+            parity::remote::dlna_get_state,
             get_track_source_path,
             update_track_analysis,
             parity::metadata_write::update_track_metadata,

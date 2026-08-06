@@ -16,5 +16,6 @@ pub mod native_analysis;
 pub mod native_playback;
 pub mod playlist_files;
 pub mod playlists;
+pub mod remote;
 pub mod watched_folder;
 pub mod waveform;
