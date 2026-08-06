@@ -23,8 +23,9 @@ const STATUS_ACCEPTED: &str = "accepted";
 const AUDIO_EXTENSIONS: [&str; 10] = [
     "mp3", "flac", "wav", "m4a", "aac", "ogg", "opus", "aiff", "aif", "alac",
 ];
-const NATIVE_IMPORT_EXTENSIONS: [&str; 8] =
-    ["mp3", "flac", "wav", "m4a", "aac", "ogg", "aiff", "alac"];
+const NATIVE_IMPORT_EXTENSIONS: [&str; 10] = [
+    "mp3", "flac", "wav", "m4a", "aac", "ogg", "opus", "aiff", "aif", "alac",
+];
 
 #[derive(Debug, Serialize, Clone)]
 pub struct ImportFailure {
@@ -1482,6 +1483,14 @@ fn current_timestamp() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_import_extensions_match_scanner_extensions() {
+        for extension in ["opus", "aif", "aiff"] {
+            assert!(AUDIO_EXTENSIONS.contains(&extension));
+            assert!(NATIVE_IMPORT_EXTENSIONS.contains(&extension));
+        }
+    }
 
     #[test]
     fn portable_paths_reject_absolute_and_traversal_segments() {

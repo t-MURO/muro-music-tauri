@@ -7,16 +7,19 @@ use lofty::id3::v2::Popularimeter;
 use lofty::prelude::*;
 use lofty::probe::Probe;
 use lofty::tag::{ItemValue, Tag, TagItem, TagType};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
-const AUDIO_EXTENSIONS: [&str; 8] = ["mp3", "flac", "wav", "m4a", "aac", "ogg", "aiff", "alac"];
+const AUDIO_EXTENSIONS: [&str; 10] = [
+    "mp3", "flac", "wav", "m4a", "aac", "ogg", "opus", "aiff", "aif", "alac",
+];
 const STATUS_STAGED: &str = "staged";
 const STATUS_ACCEPTED: &str = "accepted";
 const DEFAULT_DURATION: &str = "--:--";
@@ -80,6 +83,29 @@ pub struct PlaylistRow {
     pub track_ids: Vec<String>,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct ImportedArtistCredit {
+    name: String,
+    credited_name: String,
+    join_phrase: String,
+    musicbrainz_id: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+struct TechnicalMetadata {
+    sample_rate_hz: i64,
+    bit_depth: i64,
+    file_size_bytes: i64,
+    updated_at: i64,
+}
+
+impl TechnicalMetadata {
+    fn loudness_source(metadata: &NormalizedMetadata) -> Option<&'static str> {
+        (metadata.replaygain_track_gain_db.is_some() || metadata.replaygain_album_gain_db.is_some())
+            .then_some("tag")
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 struct NormalizedMetadata {
     title: Option<String>,
@@ -114,6 +140,13 @@ struct NormalizedMetadata {
     musicbrainz_releasetrackid: Option<String>,
     musicbrainz_albumstatus: Option<String>,
     musicbrainz_albumtype: Option<String>,
+    acoustid_id: Option<String>,
+    replaygain_track_gain_db: Option<f64>,
+    replaygain_track_peak: Option<f64>,
+    replaygain_album_gain_db: Option<f64>,
+    replaygain_album_peak: Option<f64>,
+    artist_credits: Vec<ImportedArtistCredit>,
+    album_artist_credits: Vec<ImportedArtistCredit>,
 }
 
 pub fn import_files(
@@ -531,11 +564,47 @@ fn import_single(
     now: i64,
     cache_dir: &Path,
 ) -> Result<Option<ImportedTrack>, String> {
+    conn.execute_batch("SAVEPOINT muro_import_one")
+        .map_err(|error| error.to_string())?;
+    match import_single_inner(conn, path, now, cache_dir) {
+        Ok(value) => {
+            conn.execute_batch("RELEASE SAVEPOINT muro_import_one")
+                .map_err(|error| error.to_string())?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch(
+                "ROLLBACK TO SAVEPOINT muro_import_one; RELEASE SAVEPOINT muro_import_one",
+            );
+            Err(error)
+        }
+    }
+}
+
+fn import_single_inner(
+    conn: &Connection,
+    path: &Path,
+    now: i64,
+    cache_dir: &Path,
+) -> Result<Option<ImportedTrack>, String> {
     let tagged = Probe::open(path)
         .map_err(|error| error.to_string())?
         .read()
         .map_err(|error| error.to_string())?;
     let properties = tagged.properties();
+    let file_metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    let updated_at = file_metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_secs() as i64)
+        .unwrap_or(now);
+    let technical = TechnicalMetadata {
+        sample_rate_hz: properties.sample_rate().unwrap_or(0) as i64,
+        bit_depth: properties.bit_depth().unwrap_or(0) as i64,
+        file_size_bytes: i64::try_from(file_metadata.len()).unwrap_or(i64::MAX),
+        updated_at,
+    };
     let metadata = normalize_metadata(&tagged, path)?;
 
     let title = metadata
@@ -551,6 +620,13 @@ fn import_single(
         .clone()
         .unwrap_or_else(|| UNKNOWN_ALBUM.to_string());
     let rating = metadata.rating.unwrap_or(0.0);
+    let artist_credits = if metadata.artist_credits.is_empty() {
+        infer_artist_credits(&artist, &[artist.clone()], &[])
+    } else {
+        metadata.artist_credits.clone()
+    };
+    let album_artist_credits = metadata.album_artist_credits.clone();
+    let loudness_source = TechnicalMetadata::loudness_source(&metadata);
 
     // Extract and cache cover art
     let cached_cover = cover_art::process_cover_art(&tagged, cache_dir);
@@ -609,16 +685,20 @@ fn import_single(
             disc_total, key, bpm, rating, isrc_json, encoder, encoder_tag, encoder_tool, raw_tags_json,
             musicbrainz_albumid, musicbrainz_artistid, musicbrainz_albumartistid,
             musicbrainz_releasegroupid, musicbrainz_trackid, musicbrainz_releasetrackid,
-            musicbrainz_albumstatus, musicbrainz_albumtype, source_path, search_text,
-            import_status, duration_seconds, bitrate_kbps, added_at, updated_at, is_missing,
-            cover_art_path, cover_art_thumb_path
+            musicbrainz_albumstatus, musicbrainz_albumtype, acoustid_id, source_path, search_text,
+            import_status, duration_seconds, bitrate_kbps, sample_rate_hz, bit_depth, file_size_bytes,
+            added_at, updated_at, is_missing, cover_art_path, cover_art_thumb_path,
+            replaygain_track_gain_db, replaygain_track_peak, replaygain_album_gain_db,
+            replaygain_album_peak, loudness_source
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
             ?10, ?11, ?12, ?13, ?14, ?15, ?16,
             ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25,
             ?26, ?27, ?28, ?29, ?30, ?31,
-            ?32, ?33, ?34, ?35,
-            ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43
+            ?32, ?33, ?34, ?35, ?36,
+            ?37, ?38, ?39, ?40, ?41, ?42,
+            ?43, ?44, ?45, ?46, ?47,
+            ?48, ?49, ?50, ?51, ?52
         )",
         params![
             id,
@@ -654,16 +734,25 @@ fn import_single(
             metadata.musicbrainz_releasetrackid,
             metadata.musicbrainz_albumstatus,
             metadata.musicbrainz_albumtype,
+            metadata.acoustid_id,
             path.to_string_lossy().to_string(),
             search_text,
             STATUS_STAGED,
             duration_seconds,
             bitrate,
+            technical.sample_rate_hz,
+            technical.bit_depth,
+            technical.file_size_bytes,
             now,
-            now,
+            technical.updated_at,
             0,
             cover_art_path,
-            cover_art_thumb_path
+            cover_art_thumb_path,
+            metadata.replaygain_track_gain_db,
+            metadata.replaygain_track_peak,
+            metadata.replaygain_album_gain_db,
+            metadata.replaygain_album_peak,
+            loudness_source
         ],
     )
     .map_err(|error| error.to_string())?;
@@ -671,6 +760,11 @@ fn import_single(
     // If no rows were inserted (duplicate source_path), return None
     if conn.changes() == 0 {
         return Ok(None);
+    }
+
+    persist_artist_credits(conn, &id, "track", &artist, &artist_credits, now)?;
+    if let Some(album_artist) = metadata.album_artist.as_deref() {
+        persist_artist_credits(conn, &id, "album", album_artist, &album_artist_credits, now)?;
     }
 
     let date_added = Some(format_timestamp(now));
@@ -699,7 +793,7 @@ fn import_single(
         year: metadata.year,
         date: metadata.date.clone(),
         date_added: date_added.clone(),
-        date_modified: date_added,
+        date_modified: Some(format_timestamp(technical.updated_at)),
         duration: duration_text,
         duration_seconds: duration_seconds as f64,
         bitrate: bitrate_text,
@@ -828,6 +922,41 @@ fn normalize_metadata(tagged: &TaggedFile, path: &Path) -> Result<NormalizedMeta
             .get_string(&ItemKey::Unknown("MusicBrainz Album Type".to_string()))
             .map(str::to_string);
 
+        meta.acoustid_id = first_unknown_value(tagged, &["ACOUSTID_ID", "ACOUSTID ID"]);
+        meta.replaygain_track_gain_db = first_key_value(tagged, &ItemKey::ReplayGainTrackGain)
+            .and_then(|value| parse_replaygain(&value));
+        meta.replaygain_track_peak = first_key_value(tagged, &ItemKey::ReplayGainTrackPeak)
+            .and_then(|value| parse_replaygain(&value));
+        meta.replaygain_album_gain_db = first_key_value(tagged, &ItemKey::ReplayGainAlbumGain)
+            .and_then(|value| parse_replaygain(&value));
+        meta.replaygain_album_peak = first_key_value(tagged, &ItemKey::ReplayGainAlbumPeak)
+            .and_then(|value| parse_replaygain(&value));
+
+        let artist_names = credit_names(tagged, "ARTISTS", &ItemKey::TrackArtist);
+        let artist_ids = values_for_key(tagged, &ItemKey::MusicBrainzArtistId);
+        meta.artist_credits = infer_artist_credits(
+            meta.artist.as_deref().unwrap_or_default(),
+            &artist_names,
+            &artist_ids,
+        );
+        let album_artist_names = credit_names(tagged, "ALBUMARTISTS", &ItemKey::AlbumArtist);
+        let album_artist_ids = values_for_key(tagged, &ItemKey::MusicBrainzReleaseArtistId);
+        meta.album_artist_credits = infer_artist_credits(
+            meta.album_artist.as_deref().unwrap_or_default(),
+            &album_artist_names,
+            &album_artist_ids,
+        );
+        meta.musicbrainz_artistid = meta
+            .artist_credits
+            .first()
+            .and_then(|credit| credit.musicbrainz_id.clone())
+            .or(meta.musicbrainz_artistid);
+        meta.musicbrainz_albumartistid = meta
+            .album_artist_credits
+            .first()
+            .and_then(|credit| credit.musicbrainz_id.clone())
+            .or(meta.musicbrainz_albumartistid);
+
         meta.filename = filename;
         meta.raw_tags = collect_raw_tags(tagged);
         return Ok(meta);
@@ -840,6 +969,271 @@ fn normalize_metadata(tagged: &TaggedFile, path: &Path) -> Result<NormalizedMeta
     })
 }
 
+fn normalized_unknown_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_uppercase)
+        .collect()
+}
+
+fn text_item_value(item: &TagItem) -> Option<String> {
+    match item.value() {
+        ItemValue::Text(value) | ItemValue::Locator(value) => Some(value.clone()),
+        ItemValue::Binary(_) => None,
+    }
+}
+
+fn values_for_key(tagged: &TaggedFile, key: &ItemKey) -> Vec<String> {
+    tagged
+        .tags()
+        .iter()
+        .flat_map(|tag| tag.items())
+        .filter(|item| item.key() == key)
+        .filter_map(text_item_value)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn unknown_values(tagged: &TaggedFile, aliases: &[&str]) -> Vec<String> {
+    let aliases: Vec<String> = aliases
+        .iter()
+        .map(|value| normalized_unknown_key(value))
+        .collect();
+    tagged
+        .tags()
+        .iter()
+        .flat_map(|tag| tag.items())
+        .filter_map(|item| {
+            let ItemKey::Unknown(key) = item.key() else {
+                return None;
+            };
+            aliases
+                .contains(&normalized_unknown_key(key))
+                .then(|| text_item_value(item))
+                .flatten()
+        })
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn first_unknown_value(tagged: &TaggedFile, aliases: &[&str]) -> Option<String> {
+    unknown_values(tagged, aliases).into_iter().next()
+}
+
+fn first_key_value(tagged: &TaggedFile, key: &ItemKey) -> Option<String> {
+    values_for_key(tagged, key).into_iter().next()
+}
+
+fn credit_names(tagged: &TaggedFile, property_name: &str, fallback: &ItemKey) -> Vec<String> {
+    let explicit = unknown_values(tagged, &[property_name]);
+    if explicit.is_empty() {
+        values_for_key(tagged, fallback)
+    } else {
+        explicit
+    }
+}
+
+fn clean_artist_name(value: &str) -> String {
+    value
+        .nfkc()
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn infer_join_phrases(display: &str, names: &[String]) -> Option<Vec<String>> {
+    if names.is_empty() {
+        return Some(Vec::new());
+    }
+    if names.len() == 1 {
+        return (display == names[0]).then(|| vec![String::new()]);
+    }
+    let mut starts = Vec::with_capacity(names.len());
+    let mut cursor = 0;
+    for (index, name) in names.iter().enumerate() {
+        let relative = display.get(cursor..)?.find(name)?;
+        let start = cursor + relative;
+        if index == 0 && start != 0 {
+            return None;
+        }
+        starts.push(start);
+        cursor = start + name.len();
+    }
+    Some(
+        names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let end = starts[index] + name.len();
+                if index + 1 < names.len() {
+                    display[end..starts[index + 1]].to_string()
+                } else {
+                    display[end..].to_string()
+                }
+            })
+            .collect(),
+    )
+}
+
+fn infer_artist_credits(
+    display: &str,
+    raw_names: &[String],
+    raw_ids: &[String],
+) -> Vec<ImportedArtistCredit> {
+    let names: Vec<String> = raw_names
+        .iter()
+        .filter(|name| !name.trim().is_empty())
+        .cloned()
+        .collect();
+    let display = if display.trim().is_empty() {
+        names.join(", ")
+    } else {
+        display.to_string()
+    };
+    if display.trim().is_empty() {
+        return Vec::new();
+    }
+    let names = if names.is_empty() {
+        vec![display.clone()]
+    } else {
+        names
+    };
+    let ids: Vec<String> = raw_ids
+        .iter()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect();
+    let Some(joins) = infer_join_phrases(&display, &names) else {
+        return vec![ImportedArtistCredit {
+            name: clean_artist_name(&display),
+            credited_name: display,
+            join_phrase: String::new(),
+            musicbrainz_id: (names.len() == 1 && ids.len() == 1).then(|| ids[0].clone()),
+        }];
+    };
+    let positional_ids = (ids.len() == names.len()).then_some(ids);
+    names
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| ImportedArtistCredit {
+            name: clean_artist_name(&name),
+            credited_name: name,
+            join_phrase: joins.get(index).cloned().unwrap_or_default(),
+            musicbrainz_id: positional_ids
+                .as_ref()
+                .and_then(|values| values.get(index).cloned()),
+        })
+        .collect()
+}
+
+fn parse_replaygain(value: &str) -> Option<f64> {
+    value
+        .trim()
+        .split_whitespace()
+        .next()?
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+}
+fn normalized_artist_key(value: &str) -> String {
+    clean_artist_name(value).to_lowercase()
+}
+
+fn find_or_create_artist(
+    conn: &Connection,
+    credit: &ImportedArtistCredit,
+    now: i64,
+) -> Result<String, String> {
+    if let Some(mbid) = credit.musicbrainz_id.as_deref() {
+        if let Some(id) = conn
+            .query_row(
+                "SELECT id FROM artist_entities WHERE musicbrainz_id=?1 COLLATE NOCASE",
+                [mbid],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(id);
+        }
+    }
+    let normalized = normalized_artist_key(&credit.name);
+    if let Some(id) = conn
+        .query_row(
+            "SELECT id FROM artist_entities
+             WHERE normalized_name=?1
+               AND (?2 IS NULL OR musicbrainz_id IS NULL OR musicbrainz_id=?2 COLLATE NOCASE)
+             ORDER BY created_at,id LIMIT 1",
+            params![normalized, credit.musicbrainz_id.as_deref()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+    {
+        if let Some(mbid) = credit.musicbrainz_id.as_deref() {
+            conn.execute(
+                "UPDATE artist_entities SET musicbrainz_id=COALESCE(musicbrainz_id,?1),updated_at=?2 WHERE id=?3",
+                params![mbid, now, id],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        return Ok(id);
+    }
+    let id = Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO artist_entities(id,canonical_name,normalized_name,musicbrainz_id,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?5)",
+        params![id, credit.name, normalized, credit.musicbrainz_id, now],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(id)
+}
+
+fn persist_artist_credits(
+    conn: &Connection,
+    track_id: &str,
+    scope: &str,
+    display: &str,
+    credits: &[ImportedArtistCredit],
+    now: i64,
+) -> Result<(), String> {
+    if display.trim().is_empty() || credits.is_empty() {
+        return Ok(());
+    }
+    let rendered: String = credits
+        .iter()
+        .map(|credit| format!("{}{}", credit.credited_name, credit.join_phrase))
+        .collect();
+    if rendered != display {
+        return Err(
+            "Artist credit names and join phrases do not reproduce the display value".into(),
+        );
+    }
+    conn.execute(
+        "INSERT INTO track_artist_credit_sets(track_id,scope,display_text,provenance,confidence,needs_review,created_at,updated_at) VALUES(?1,?2,?3,'file-tags',100,0,?4,?4)",
+        params![track_id, scope, display, now],
+    )
+    .map_err(|error| error.to_string())?;
+    for (position, credit) in credits.iter().enumerate() {
+        let artist_id = find_or_create_artist(conn, credit, now)?;
+        conn.execute(
+            "INSERT INTO track_artist_credits(track_id,scope,position,artist_id,credited_name,join_phrase,role) VALUES(?1,?2,?3,?4,?5,?6,NULL)",
+            params![
+                track_id,
+                scope,
+                position as i64,
+                artist_id,
+                credit.credited_name,
+                credit.join_phrase
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
 fn collect_raw_tags(tagged: &TaggedFile) -> serde_json::Value {
     let mut map = BTreeMap::new();
     for tag in tagged.tags() {
@@ -1051,6 +1445,63 @@ pub fn ensure_schema(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|error| error.to_string())?;
 
+    conn.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         CREATE TABLE IF NOT EXISTS artist_entities (
+           id TEXT PRIMARY KEY,
+           canonical_name TEXT NOT NULL,
+           normalized_name TEXT NOT NULL,
+           musicbrainz_id TEXT,
+           created_at INTEGER NOT NULL,
+           updated_at INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS artist_entities_normalized_name_idx
+           ON artist_entities(normalized_name);
+         CREATE UNIQUE INDEX IF NOT EXISTS artist_entities_musicbrainz_id_uidx
+           ON artist_entities(musicbrainz_id COLLATE NOCASE)
+           WHERE musicbrainz_id IS NOT NULL AND trim(musicbrainz_id) <> '';
+         CREATE TABLE IF NOT EXISTS track_artist_credit_sets (
+           track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+           scope TEXT NOT NULL CHECK(scope IN ('track', 'album')),
+           display_text TEXT NOT NULL,
+           provenance TEXT NOT NULL,
+           confidence INTEGER NOT NULL CHECK(confidence BETWEEN 0 AND 100),
+           needs_review INTEGER NOT NULL DEFAULT 0 CHECK(needs_review IN (0, 1)),
+           created_at INTEGER NOT NULL,
+           updated_at INTEGER NOT NULL,
+           PRIMARY KEY(track_id, scope)
+         ) WITHOUT ROWID;
+         CREATE TABLE IF NOT EXISTS track_artist_credits (
+           track_id TEXT NOT NULL,
+           scope TEXT NOT NULL CHECK(scope IN ('track', 'album')),
+           position INTEGER NOT NULL CHECK(position >= 0),
+           artist_id TEXT NOT NULL REFERENCES artist_entities(id) ON DELETE RESTRICT,
+           credited_name TEXT NOT NULL,
+           join_phrase TEXT NOT NULL DEFAULT '',
+           role TEXT,
+           PRIMARY KEY(track_id, scope, position),
+           FOREIGN KEY(track_id, scope)
+             REFERENCES track_artist_credit_sets(track_id, scope) ON DELETE CASCADE
+         ) WITHOUT ROWID;
+         CREATE INDEX IF NOT EXISTS track_artist_credits_artist_idx
+           ON track_artist_credits(artist_id, scope, track_id);",
+    )
+    .map_err(|error| error.to_string())?;
+
+    for (name, sql_type) in [
+        ("acoustid_id", "TEXT"),
+        ("sample_rate_hz", "INTEGER"),
+        ("bit_depth", "INTEGER"),
+        ("file_size_bytes", "INTEGER"),
+        ("replaygain_track_gain_db", "REAL"),
+        ("replaygain_track_peak", "REAL"),
+        ("replaygain_album_gain_db", "REAL"),
+        ("replaygain_album_peak", "REAL"),
+        ("loudness_source", "TEXT"),
+    ] {
+        let statement = format!("ALTER TABLE tracks ADD COLUMN {name} {sql_type}");
+        let _ = conn.execute(&statement, []);
+    }
     // Add columns if they don't exist (for existing databases)
     let _ = conn.execute("ALTER TABLE tracks ADD COLUMN cover_art_path TEXT", []);
     let _ = conn.execute(
@@ -1065,4 +1516,139 @@ pub fn ensure_schema(conn: &Connection) -> Result<(), String> {
     );
 
     Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_extension_allowlist_includes_opus_and_both_aiff_suffixes() {
+        assert!(AUDIO_EXTENSIONS.contains(&"opus"));
+        assert!(AUDIO_EXTENSIONS.contains(&"aif"));
+        assert!(AUDIO_EXTENSIONS.contains(&"aiff"));
+    }
+
+    #[test]
+    fn replaygain_values_accept_db_suffix_and_reject_non_finite_data() {
+        assert_eq!(parse_replaygain("-7.25 dB"), Some(-7.25));
+        assert_eq!(parse_replaygain("0.9821"), Some(0.9821));
+        assert_eq!(parse_replaygain("NaN dB"), None);
+        assert_eq!(parse_replaygain("not-a-number"), None);
+    }
+
+    #[test]
+    fn structured_credits_preserve_exact_join_phrases_and_positional_mbids() {
+        let credits = infer_artist_credits(
+            "Alpha feat. Beta & Gamma",
+            &["Alpha".into(), "Beta".into(), "Gamma".into()],
+            &["mb-a".into(), "mb-b".into(), "mb-c".into()],
+        );
+        assert_eq!(credits.len(), 3);
+        assert_eq!(credits[0].join_phrase, " feat. ");
+        assert_eq!(credits[1].join_phrase, " & ");
+        assert_eq!(credits[2].join_phrase, "");
+        assert_eq!(credits[1].musicbrainz_id.as_deref(), Some("mb-b"));
+        let rendered: String = credits
+            .iter()
+            .map(|credit| format!("{}{}", credit.credited_name, credit.join_phrase))
+            .collect();
+        assert_eq!(rendered, "Alpha feat. Beta & Gamma");
+    }
+
+    #[test]
+    fn credit_persistence_does_not_depend_on_migration_state() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO tracks(id,artist,source_path) VALUES('track','Alpha feat. Beta','x')",
+            [],
+        )
+        .unwrap();
+        let credits = infer_artist_credits(
+            "Alpha feat. Beta",
+            &["Alpha".into(), "Beta".into()],
+            &["mb-a".into(), "mb-b".into()],
+        );
+        persist_artist_credits(&conn, "track", "track", "Alpha feat. Beta", &credits, 10).unwrap();
+        let rows: Vec<(String, String, Option<String>)> = conn
+            .prepare(
+                "SELECT c.credited_name,c.join_phrase,e.musicbrainz_id
+                 FROM track_artist_credits c JOIN artist_entities e ON e.id=c.artist_id
+                 WHERE c.track_id='track' ORDER BY c.position",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows[0],
+            ("Alpha".into(), " feat. ".into(), Some("mb-a".into()))
+        );
+        assert_eq!(rows[1], ("Beta".into(), "".into(), Some("mb-b".into())));
+    }
+
+    #[test]
+    fn minimal_wav_import_persists_technical_file_metadata() {
+        let root = std::env::temp_dir().join(format!("muro-import-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let audio = root.join("tone.wav");
+        let db = root.join("library.sqlite");
+        let cache = root.join("covers");
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&38_u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&44_100_u32.to_le_bytes());
+        wav.extend_from_slice(&88_200_u32.to_le_bytes());
+        wav.extend_from_slice(&2_u16.to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&2_u32.to_le_bytes());
+        wav.extend_from_slice(&0_i16.to_le_bytes());
+        std::fs::write(&audio, &wav).unwrap();
+
+        let imported = import_files(
+            vec![audio.to_string_lossy().into_owned()],
+            &db.to_string_lossy(),
+            &cache,
+        )
+        .unwrap();
+        assert_eq!(imported.len(), 1);
+        let conn = Connection::open(&db).unwrap();
+        let values: (i64, i64, i64) = conn
+            .query_row(
+                "SELECT sample_rate_hz,bit_depth,file_size_bytes FROM tracks",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(values, (44_100, 16, wav.len() as i64));
+
+        conn.execute(
+            "UPDATE tracks SET title='User title',rating=4.5,import_status='accepted'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let duplicate = import_files(
+            vec![audio.to_string_lossy().into_owned()],
+            &db.to_string_lossy(),
+            &cache,
+        )
+        .unwrap();
+        assert!(duplicate.is_empty());
+        let conn = Connection::open(&db).unwrap();
+        let preserved: (String, f64, String) = conn
+            .query_row("SELECT title,rating,import_status FROM tracks", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(preserved, ("User title".into(), 4.5, "accepted".into()));
+        drop(conn);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
