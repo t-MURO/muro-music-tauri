@@ -7,42 +7,9 @@ pub mod search;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager, WindowEvent};
 
-// Constants for import status values
-const STATUS_STAGED: &str = "staged";
-const STATUS_ACCEPTED: &str = "accepted";
 const COVERS_DIR: &str = "covers";
-
-fn import_files(
-    app: tauri::AppHandle,
-    paths: Vec<String>,
-    db_path: String,
-) -> Result<Vec<import::ImportedTrack>, String> {
-    if paths.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Resolve cover art cache directory
-    let cache_dir = app
-        .path()
-        .app_cache_dir()
-        .map_err(|e| e.to_string())?
-        .join(COVERS_DIR);
-
-    import::import_files_with_progress(paths, &db_path, &cache_dir, |progress| {
-        let _ = app.emit("muro://import-progress", progress);
-    })
-}
-
-fn load_tracks(db_path: String) -> Result<import::LibrarySnapshot, String> {
-    import::load_tracks(&db_path)
-}
-
-fn load_playlists(db_path: String) -> Result<import::PlaylistSnapshot, String> {
-    import::load_playlists(&db_path)
-}
 
 #[tauri::command(rename_all = "camelCase")]
 fn clear_tracks(app: tauri::AppHandle, db_path: String) -> Result<(), String> {
@@ -52,10 +19,6 @@ fn clear_tracks(app: tauri::AppHandle, db_path: String) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .join(COVERS_DIR);
     import::clear_tracks(&db_path, &cache_dir)
-}
-
-fn backfill_search_text(db_path: String) -> Result<usize, String> {
-    backfill::run_backfill(&db_path)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -106,135 +69,6 @@ fn update_track_analysis(
     Ok(())
 }
 
-fn record_track_play(db_path: String, track_id: String) -> Result<(), String> {
-    if !Path::new(&db_path).exists() {
-        return Err("Database not found".to_string());
-    }
-
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
-
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_secs() as i64;
-
-    // Format timestamp as ISO 8601
-    let formatted = chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0)
-        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-        .unwrap_or_default();
-
-    conn.execute(
-        "UPDATE tracks SET last_played_at = ?1, play_count = COALESCE(play_count, 0) + 1 WHERE id = ?2",
-        rusqlite::params![formatted, track_id],
-    )
-    .map_err(|e| e.to_string())?;
-
-    Ok(())
-}
-
-fn load_recently_played(db_path: String, limit: i32) -> Result<Vec<import::ImportedTrack>, String> {
-    if !Path::new(&db_path).exists() {
-        return Ok(Vec::new());
-    }
-
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
-    import::ensure_schema(&conn)?;
-
-    import::load_recently_played(&conn, limit)
-}
-
-fn create_playlist(db_path: String, id: String, name: String) -> Result<(), String> {
-    if let Some(parent) = Path::new(&db_path).parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-
-    let conn = Connection::open(&db_path).map_err(|error| error.to_string())?;
-    import::ensure_playlist_schema(&conn)?;
-
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_secs() as i64;
-
-    conn.execute(
-        "INSERT INTO playlists (id, name, created_at) VALUES (?1, ?2, ?3)",
-        (&id, &name, timestamp),
-    )
-    .map_err(|error| error.to_string())?;
-
-    Ok(())
-}
-
-fn add_tracks_to_playlist(
-    db_path: String,
-    playlist_id: String,
-    track_ids: Vec<String>,
-) -> Result<(), String> {
-    if track_ids.is_empty() {
-        return Ok(());
-    }
-
-    let mut conn = Connection::open(&db_path).map_err(|error| error.to_string())?;
-    import::ensure_playlist_schema(&conn)?;
-
-    let tx = conn.transaction().map_err(|error| error.to_string())?;
-
-    // Get current max position for this playlist
-    let max_position: i64 = tx
-        .query_row(
-            "SELECT COALESCE(MAX(position), -1) FROM playlist_tracks WHERE playlist_id = ?1",
-            [&playlist_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(-1);
-
-    let mut position = max_position + 1;
-    for track_id in track_ids {
-        tx.execute(
-            "INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
-            (&playlist_id, &track_id, position),
-        )
-        .map_err(|error| error.to_string())?;
-        position += 1;
-    }
-
-    tx.commit().map_err(|error| error.to_string())?;
-    Ok(())
-}
-
-fn remove_last_tracks_from_playlist(
-    db_path: String,
-    playlist_id: String,
-    count: i64,
-) -> Result<(), String> {
-    if count <= 0 {
-        return Ok(());
-    }
-
-    let conn = Connection::open(&db_path).map_err(|error| error.to_string())?;
-
-    conn.execute(
-        "DELETE FROM playlist_tracks WHERE rowid IN (
-            SELECT rowid FROM playlist_tracks 
-            WHERE playlist_id = ?1 
-            ORDER BY position DESC 
-            LIMIT ?2
-        )",
-        rusqlite::params![&playlist_id, count],
-    )
-    .map_err(|error| error.to_string())?;
-
-    Ok(())
-}
-
-fn delete_playlist(db_path: String, playlist_id: String) -> Result<(), String> {
-    let conn = Connection::open(&db_path).map_err(|error| error.to_string())?;
-    conn.execute("DELETE FROM playlists WHERE id = ?1", [&playlist_id])
-        .map_err(|error| error.to_string())?;
-
-    Ok(())
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 struct CachedCoverResult {
     full_path: String,
@@ -261,61 +95,6 @@ fn cache_cover_art_from_file(
         full_path: cached.full_path,
         thumb_path: cached.thumb_path,
     })
-}
-
-/// Execute a bulk operation on tracks by ID
-fn execute_bulk_track_operation(
-    db_path: &str,
-    track_ids: &[String],
-    sql_template: &str,
-) -> Result<(), String> {
-    if track_ids.is_empty() {
-        return Ok(());
-    }
-
-    let conn = Connection::open(db_path).map_err(|error| error.to_string())?;
-
-    let placeholders: Vec<String> = track_ids
-        .iter()
-        .enumerate()
-        .map(|(i, _)| format!("?{}", i + 1))
-        .collect();
-    let sql = sql_template.replace("{}", &placeholders.join(", "));
-
-    let params: Vec<&dyn rusqlite::ToSql> = track_ids
-        .iter()
-        .map(|id| id as &dyn rusqlite::ToSql)
-        .collect();
-    conn.execute(&sql, params.as_slice())
-        .map_err(|error| error.to_string())?;
-
-    Ok(())
-}
-
-fn accept_tracks(db_path: String, track_ids: Vec<String>) -> Result<(), String> {
-    execute_bulk_track_operation(
-        &db_path,
-        &track_ids,
-        &format!(
-            "UPDATE tracks SET import_status = '{}' WHERE id IN ({{}})",
-            STATUS_ACCEPTED
-        ),
-    )
-}
-
-fn unaccept_tracks(db_path: String, track_ids: Vec<String>) -> Result<(), String> {
-    execute_bulk_track_operation(
-        &db_path,
-        &track_ids,
-        &format!(
-            "UPDATE tracks SET import_status = '{}' WHERE id IN ({{}})",
-            STATUS_STAGED
-        ),
-    )
-}
-
-fn reject_tracks(db_path: String, track_ids: Vec<String>) -> Result<(), String> {
-    execute_bulk_track_operation(&db_path, &track_ids, "DELETE FROM tracks WHERE id IN ({})")
 }
 
 #[tauri::command]
