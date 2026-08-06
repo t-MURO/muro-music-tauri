@@ -1,8 +1,8 @@
 [package]
 name = "muro-music"
-version = "0.1.0"
-description = "A cross-platform desktop music player"
-authors = ["you"]
+version = "0.1.10"
+description = "A customizable desktop music library and player"
+authors = ["Muro Music contributors"]
 edition = "2021"
 default-run = "muro-music"
 
