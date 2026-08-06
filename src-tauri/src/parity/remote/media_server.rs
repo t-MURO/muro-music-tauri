@@ -253,7 +253,8 @@ fn parse_request(request: &[u8]) -> Option<(String, String, Option<String>)> {
     let mut start = lines.next()?.split_whitespace();
     let method = start.next()?.to_ascii_uppercase();
     let target = start.next()?.to_string();
-    if start.next()? != "HTTP/1.1"
+    let version = start.next()?;
+    if !matches!(version, "HTTP/1.0" | "HTTP/1.1")
         || start.next().is_some()
         || !target.starts_with('/')
         || target.contains('#')
@@ -413,5 +414,6 @@ mod tests {
     fn validates_request_target() {
         assert!(parse_request(b"GET media/x/y HTTP/1.1\r\n\r\n").is_none());
         assert!(parse_request(b"POST /media/x/y HTTP/1.1\r\n\r\n").is_some());
+        assert!(parse_request(b"GET /media/x/y HTTP/1.0\r\n\r\n").is_some());
     }
 }

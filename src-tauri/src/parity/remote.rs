@@ -758,32 +758,48 @@ fn dlna_content_type(path: &str) -> Option<&'static str> {
 }
 
 #[tauri::command]
-pub fn cast_start_discovery(service: State<'_, RemoteOutputService>) -> DiscoverySnapshot {
-    service.cast.start_discovery()
+pub async fn cast_start_discovery(
+    service: State<'_, RemoteOutputService>,
+) -> Result<DiscoverySnapshot, String> {
+    let cast = service.cast.clone();
+    tauri::async_runtime::spawn_blocking(move || cast.start_discovery())
+        .await
+        .map_err(|error| error.to_string())
 }
 #[tauri::command]
-pub fn cast_stop_discovery(service: State<'_, RemoteOutputService>) -> DiscoverySnapshot {
-    service.cast.discovery.stop()
+pub async fn cast_stop_discovery(
+    service: State<'_, RemoteOutputService>,
+) -> Result<DiscoverySnapshot, String> {
+    let cast = service.cast.clone();
+    tauri::async_runtime::spawn_blocking(move || cast.discovery.stop())
+        .await
+        .map_err(|error| error.to_string())
 }
 #[tauri::command]
 pub fn cast_get_devices(service: State<'_, RemoteOutputService>) -> DiscoverySnapshot {
     service.cast.discovery.snapshot()
 }
 #[tauri::command(rename_all = "camelCase")]
-pub fn cast_connect(
+pub async fn cast_connect(
     service: State<'_, RemoteOutputService>,
     device_id: String,
 ) -> Result<SessionState, String> {
-    service.cast.connect(&device_id)
+    let cast = service.cast.clone();
+    tauri::async_runtime::spawn_blocking(move || cast.connect(&device_id))
+        .await
+        .map_err(|error| error.to_string())?
 }
 #[tauri::command]
-pub fn cast_disconnect(
+pub async fn cast_disconnect(
     service: State<'_, RemoteOutputService>,
 ) -> Result<DisconnectResult, String> {
-    service.cast.disconnect()
+    let cast = service.cast.clone();
+    tauri::async_runtime::spawn_blocking(move || cast.disconnect())
+        .await
+        .map_err(|error| error.to_string())?
 }
 #[tauri::command(rename_all = "camelCase")]
-pub fn cast_load_track(
+pub async fn cast_load_track(
     service: State<'_, RemoteOutputService>,
     track_id: String,
     source_path: String,
@@ -795,52 +811,70 @@ pub fn cast_load_track(
     start_position_secs: Option<f64>,
     autoplay: Option<bool>,
 ) -> Result<SessionState, String> {
-    service.cast.load(LoadTrack {
-        track_id,
-        source_path,
-        title,
-        artist,
-        album,
-        duration_seconds,
-        cover_art_path,
-        start_position_secs,
-        autoplay,
+    let cast = service.cast.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        cast.load(LoadTrack {
+            track_id,
+            source_path,
+            title,
+            artist,
+            album,
+            duration_seconds,
+            cover_art_path,
+            start_position_secs,
+            autoplay,
+        })
     })
+    .await
+    .map_err(|error| error.to_string())?
 }
 #[tauri::command]
-pub fn cast_play(service: State<'_, RemoteOutputService>) -> Result<SessionState, String> {
-    service.cast.media_command(CastClient::play)
+pub async fn cast_play(service: State<'_, RemoteOutputService>) -> Result<SessionState, String> {
+    let cast = service.cast.clone();
+    tauri::async_runtime::spawn_blocking(move || cast.media_command(CastClient::play))
+        .await
+        .map_err(|error| error.to_string())?
 }
 #[tauri::command]
-pub fn cast_pause(service: State<'_, RemoteOutputService>) -> Result<SessionState, String> {
-    service.cast.media_command(CastClient::pause)
+pub async fn cast_pause(service: State<'_, RemoteOutputService>) -> Result<SessionState, String> {
+    let cast = service.cast.clone();
+    tauri::async_runtime::spawn_blocking(move || cast.media_command(CastClient::pause))
+        .await
+        .map_err(|error| error.to_string())?
 }
 #[tauri::command(rename_all = "camelCase")]
-pub fn cast_seek(
+pub async fn cast_seek(
     service: State<'_, RemoteOutputService>,
     position_secs: f64,
 ) -> Result<SessionState, String> {
-    service
-        .cast
-        .media_command(|client| client.seek(position_secs))
+    let cast = service.cast.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        cast.media_command(|client| client.seek(position_secs))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 #[tauri::command]
-pub fn cast_set_volume(
+pub async fn cast_set_volume(
     service: State<'_, RemoteOutputService>,
     volume: f64,
 ) -> Result<SessionState, String> {
-    let client = service
-        .cast
-        .session
-        .lock()
-        .map_err(lock_error)?
-        .as_ref()
-        .map(|value| value.client.clone())
-        .ok_or_else(|| stable("CAST_SESSION_ENDED", "No active cast session"))?;
-    client
-        .volume(volume)
-        .map_err(|error| stable("CAST_COMMAND_FAILED", &error))?;
-    Ok(service.cast.state())
+    let cast = service.cast.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let client = cast
+            .session
+            .lock()
+            .map_err(lock_error)?
+            .as_ref()
+            .map(|value| value.client.clone())
+            .ok_or_else(|| stable("CAST_SESSION_ENDED", "No active cast session"))?;
+        client
+            .volume(volume)
+            .map_err(|error| stable("CAST_COMMAND_FAILED", &error))?;
+        Ok(cast.state())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 #[tauri::command]
 pub fn cast_get_state(service: State<'_, RemoteOutputService>) -> StateWithDiscovery {
@@ -851,32 +885,48 @@ pub fn cast_get_state(service: State<'_, RemoteOutputService>) -> StateWithDisco
 }
 
 #[tauri::command]
-pub fn dlna_start_discovery(service: State<'_, RemoteOutputService>) -> DiscoverySnapshot {
-    service.dlna.start_discovery()
+pub async fn dlna_start_discovery(
+    service: State<'_, RemoteOutputService>,
+) -> Result<DiscoverySnapshot, String> {
+    let dlna = service.dlna.clone();
+    tauri::async_runtime::spawn_blocking(move || dlna.start_discovery())
+        .await
+        .map_err(|error| error.to_string())
 }
 #[tauri::command]
-pub fn dlna_stop_discovery(service: State<'_, RemoteOutputService>) -> DiscoverySnapshot {
-    service.dlna.discovery.stop()
+pub async fn dlna_stop_discovery(
+    service: State<'_, RemoteOutputService>,
+) -> Result<DiscoverySnapshot, String> {
+    let dlna = service.dlna.clone();
+    tauri::async_runtime::spawn_blocking(move || dlna.discovery.stop())
+        .await
+        .map_err(|error| error.to_string())
 }
 #[tauri::command]
 pub fn dlna_get_devices(service: State<'_, RemoteOutputService>) -> DiscoverySnapshot {
     service.dlna.discovery.snapshot()
 }
 #[tauri::command(rename_all = "camelCase")]
-pub fn dlna_connect(
+pub async fn dlna_connect(
     service: State<'_, RemoteOutputService>,
     device_id: String,
 ) -> Result<SessionState, String> {
-    service.dlna.connect(&device_id)
+    let dlna = service.dlna.clone();
+    tauri::async_runtime::spawn_blocking(move || dlna.connect(&device_id))
+        .await
+        .map_err(|error| error.to_string())?
 }
 #[tauri::command]
-pub fn dlna_disconnect(
+pub async fn dlna_disconnect(
     service: State<'_, RemoteOutputService>,
 ) -> Result<DisconnectResult, String> {
-    service.dlna.disconnect()
+    let dlna = service.dlna.clone();
+    tauri::async_runtime::spawn_blocking(move || dlna.disconnect())
+        .await
+        .map_err(|error| error.to_string())?
 }
 #[tauri::command(rename_all = "camelCase")]
-pub fn dlna_load_track(
+pub async fn dlna_load_track(
     service: State<'_, RemoteOutputService>,
     track_id: String,
     source_path: String,
@@ -888,39 +938,56 @@ pub fn dlna_load_track(
     start_position_secs: Option<f64>,
     autoplay: Option<bool>,
 ) -> Result<SessionState, String> {
-    service.dlna.load(LoadTrack {
-        track_id,
-        source_path,
-        title,
-        artist,
-        album,
-        duration_seconds,
-        cover_art_path,
-        start_position_secs,
-        autoplay,
+    let dlna = service.dlna.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        dlna.load(LoadTrack {
+            track_id,
+            source_path,
+            title,
+            artist,
+            album,
+            duration_seconds,
+            cover_art_path,
+            start_position_secs,
+            autoplay,
+        })
     })
+    .await
+    .map_err(|error| error.to_string())?
 }
 #[tauri::command]
-pub fn dlna_play(service: State<'_, RemoteOutputService>) -> Result<SessionState, String> {
-    service.dlna.command(DlnaClient::play)
+pub async fn dlna_play(service: State<'_, RemoteOutputService>) -> Result<SessionState, String> {
+    let dlna = service.dlna.clone();
+    tauri::async_runtime::spawn_blocking(move || dlna.command(DlnaClient::play))
+        .await
+        .map_err(|error| error.to_string())?
 }
 #[tauri::command]
-pub fn dlna_pause(service: State<'_, RemoteOutputService>) -> Result<SessionState, String> {
-    service.dlna.command(DlnaClient::pause)
+pub async fn dlna_pause(service: State<'_, RemoteOutputService>) -> Result<SessionState, String> {
+    let dlna = service.dlna.clone();
+    tauri::async_runtime::spawn_blocking(move || dlna.command(DlnaClient::pause))
+        .await
+        .map_err(|error| error.to_string())?
 }
 #[tauri::command(rename_all = "camelCase")]
-pub fn dlna_seek(
+pub async fn dlna_seek(
     service: State<'_, RemoteOutputService>,
     position_secs: f64,
 ) -> Result<SessionState, String> {
-    service.dlna.command(|client| client.seek(position_secs))
+    let dlna = service.dlna.clone();
+    tauri::async_runtime::spawn_blocking(move || dlna.command(|client| client.seek(position_secs)))
+        .await
+        .map_err(|error| error.to_string())?
 }
 #[tauri::command]
-pub fn dlna_set_volume(
+pub async fn dlna_set_volume(
     service: State<'_, RemoteOutputService>,
     volume: f64,
 ) -> Result<SessionState, String> {
-    service.dlna.command(|client| client.set_volume(volume))
+    let dlna = service.dlna.clone();
+    tauri::async_runtime::spawn_blocking(move || dlna.command(|client| client.set_volume(volume)))
+        .await
+        .map_err(|error| error.to_string())?
 }
 #[tauri::command]
 pub fn dlna_get_state(service: State<'_, RemoteOutputService>) -> StateWithDiscovery {

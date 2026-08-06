@@ -1,8 +1,9 @@
 //! SSDP discovery and a bounded UPnP AVTransport/RenderingControl client.
 
 use super::{Device, DiscoverySnapshot, MediaStatus};
+use native_tls::TlsConnector;
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{Cursor, Read, Write};
 use std::net::{IpAddr, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,6 +14,7 @@ use url::Url;
 const SSDP_TARGET: &str = "239.255.255.250:1900";
 const MEDIA_RENDERER: &str = "urn:schemas-upnp-org:device:MediaRenderer:1";
 const MAX_RESPONSE: usize = 1024 * 1024;
+const MAX_RESPONSE_HEADERS: usize = 64 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Clone, Debug)]
@@ -215,7 +217,7 @@ fn parse_ssdp(text: &str) -> Option<SsdpResponse> {
 
 fn describe(response: &SsdpResponse, remote: IpAddr) -> Option<DeviceRecord> {
     let url = Url::parse(&response.location).ok()?;
-    if url.scheme() != "http"
+    if !is_http_scheme(url.scheme())
         || url.username() != ""
         || url.password().is_some()
         || url.host_str()?.parse::<IpAddr>().ok()? != remote
@@ -258,7 +260,7 @@ fn service_urls(xml: &str, base: &Url, expected_host: &str) -> (Option<String>, 
         let kind = xml_value(block, "serviceType").unwrap_or_default();
         let control = xml_value(block, "controlURL")
             .and_then(|value| base.join(&value).ok())
-            .filter(|url| url.scheme() == "http" && url.host_str() == Some(expected_host))
+            .filter(|url| trusted_endpoint(url, expected_host))
             .map(|url| url.to_string());
         if kind.contains(":service:AVTransport:") {
             av = control;
@@ -267,6 +269,17 @@ fn service_urls(xml: &str, base: &Url, expected_host: &str) -> (Option<String>, 
         }
     }
     (av, rendering)
+}
+
+fn is_http_scheme(scheme: &str) -> bool {
+    matches!(scheme, "http" | "https")
+}
+
+fn trusted_endpoint(url: &Url, expected_host: &str) -> bool {
+    is_http_scheme(url.scheme())
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.host_str() == Some(expected_host)
 }
 
 fn usn_uuid(value: &str) -> Option<String> {
@@ -283,15 +296,23 @@ pub struct DlnaClient {
 
 impl DlnaClient {
     pub fn new(record: &DeviceRecord) -> Result<Self, String> {
-        Ok(Self {
-            av: Url::parse(&record.av_transport_url).map_err(|error| error.to_string())?,
-            rendering: record
-                .rendering_control_url
-                .as_deref()
-                .map(Url::parse)
-                .transpose()
-                .map_err(|error| error.to_string())?,
-        })
+        let av = Url::parse(&record.av_transport_url).map_err(|error| error.to_string())?;
+        if !trusted_endpoint(&av, &record.device.host) {
+            return Err("Renderer control URL is not a trusted same-host HTTP(S) endpoint".into());
+        }
+        let rendering = record
+            .rendering_control_url
+            .as_deref()
+            .map(Url::parse)
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        if rendering
+            .as_ref()
+            .is_some_and(|url| !trusted_endpoint(url, &record.device.host))
+        {
+            return Err("Renderer control URL is not a trusted same-host HTTP(S) endpoint".into());
+        }
+        Ok(Self { av, rendering })
     }
     fn av(&self, action: &str, args: &[(&str, String)]) -> Result<String, String> {
         soap(
@@ -397,18 +418,20 @@ fn http_request(
     headers: &[(&str, &str)],
     body: Option<&[u8]>,
 ) -> Result<String, String> {
-    if url.scheme() != "http" || url.username() != "" || url.password().is_some() {
-        return Err("Only trusted HTTP renderer endpoints are supported".into());
+    if !is_http_scheme(url.scheme()) || url.username() != "" || url.password().is_some() {
+        return Err("Only trusted HTTP(S) renderer endpoints are supported".into());
     }
     let host = url
         .host_str()
         .ok_or_else(|| "Renderer URL has no host".to_string())?;
-    let port = url.port_or_known_default().unwrap_or(80);
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| "Renderer URL has no known port".to_string())?;
     let addresses: Vec<_> = (host, port)
         .to_socket_addrs()
         .map_err(|error| error.to_string())?
         .collect();
-    let mut stream = addresses
+    let stream = addresses
         .into_iter()
         .find_map(|address| TcpStream::connect_timeout(&address, TIMEOUT).ok())
         .ok_or_else(|| "Renderer connection timed out".to_string())?;
@@ -424,26 +447,69 @@ fn http_request(
         url.path().into()
     };
     let bytes = body.unwrap_or_default();
-    write!(stream, "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nContent-Length: {}\r\n", bytes.len()).map_err(|error| error.to_string())?;
+    let host_header = if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    };
+    let mut request = Vec::new();
+    write!(
+        request,
+        "{method} {path} HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\nContent-Length: {}\r\n",
+        bytes.len()
+    )
+    .map_err(|error| error.to_string())?;
     for (name, value) in headers {
-        write!(stream, "{name}: {value}\r\n").map_err(|error| error.to_string())?;
+        write!(request, "{name}: {value}\r\n").map_err(|error| error.to_string())?;
     }
+    request.extend_from_slice(b"\r\n");
+    request.extend_from_slice(bytes);
+    let response = if url.scheme() == "https" {
+        let connector = TlsConnector::new().map_err(|error| error.to_string())?;
+        let mut stream = connector
+            .connect(host, stream)
+            .map_err(|error| format!("Renderer TLS handshake failed: {error}"))?;
+        exchange(&mut stream, &request)?
+    } else {
+        let mut stream = stream;
+        exchange(&mut stream, &request)?
+    };
+    Ok(String::from_utf8_lossy(&response).into_owned())
+}
+
+fn exchange(stream: &mut (impl Read + Write), request: &[u8]) -> Result<Vec<u8>, String> {
     stream
-        .write_all(b"\r\n")
-        .and_then(|_| stream.write_all(bytes))
+        .write_all(request)
+        .and_then(|_| stream.flush())
         .map_err(|error| error.to_string())?;
-    let mut response = Vec::new();
-    stream
-        .take((MAX_RESPONSE + 1) as u64)
-        .read_to_end(&mut response)
-        .map_err(|error| error.to_string())?;
-    if response.len() > MAX_RESPONSE {
-        return Err("DLNA response exceeds the allowed size".into());
+    read_http_response(stream)
+}
+
+fn read_http_response(stream: &mut impl Read) -> Result<Vec<u8>, String> {
+    let mut received = Vec::new();
+    let header_end = loop {
+        if let Some(index) = received.windows(4).position(|window| window == b"\r\n\r\n") {
+            break index;
+        }
+        if received.len() > MAX_RESPONSE_HEADERS {
+            return Err("DLNA response headers exceed the allowed size".into());
+        }
+        let mut buffer = [0_u8; 8192];
+        let length = stream
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
+        if length == 0 {
+            return Err("Malformed HTTP response".into());
+        }
+        received.extend_from_slice(&buffer[..length]);
+    };
+    if header_end > MAX_RESPONSE_HEADERS {
+        return Err("DLNA response headers exceed the allowed size".into());
     }
-    let text = String::from_utf8_lossy(&response);
-    let (head, body) = text
-        .split_once("\r\n\r\n")
-        .ok_or_else(|| "Malformed HTTP response".to_string())?;
+    let body_start = header_end + 4;
+    let initial_body = received.split_off(body_start);
+    received.truncate(header_end);
+    let head = std::str::from_utf8(&received).map_err(|_| "Malformed HTTP response".to_string())?;
     let status = head
         .lines()
         .next()
@@ -453,7 +519,129 @@ fn http_request(
     if !(200..300).contains(&status) {
         return Err(format!("Renderer request failed (HTTP {status})"));
     }
-    Ok(body.to_string())
+
+    let mut content_length = None;
+    let mut transfer_codings = Vec::new();
+    for line in head.lines().skip(1) {
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| "Malformed HTTP response header".to_string())?;
+        match name.trim().to_ascii_lowercase().as_str() {
+            "content-length" => {
+                let length = value
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| "Invalid DLNA Content-Length".to_string())?;
+                if content_length.is_some_and(|previous| previous != length) {
+                    return Err("Conflicting DLNA Content-Length headers".into());
+                }
+                content_length = Some(length);
+            }
+            "transfer-encoding" => transfer_codings.extend(
+                value
+                    .split(',')
+                    .map(|value| value.trim().to_ascii_lowercase()),
+            ),
+            _ => {}
+        }
+    }
+
+    let chunked = if transfer_codings.is_empty() {
+        false
+    } else if transfer_codings.last().map(String::as_str) == Some("chunked")
+        && transfer_codings[..transfer_codings.len() - 1]
+            .iter()
+            .all(|coding| coding == "identity")
+    {
+        true
+    } else {
+        return Err("Unsupported DLNA Transfer-Encoding".into());
+    };
+    let mut body_reader = Cursor::new(initial_body).chain(stream);
+    if chunked {
+        decode_chunked_body(&mut body_reader)
+    } else if let Some(length) = content_length {
+        if length > MAX_RESPONSE {
+            return Err("DLNA response exceeds the allowed size".into());
+        }
+        let mut body = vec![0_u8; length];
+        body_reader
+            .read_exact(&mut body)
+            .map_err(|error| error.to_string())?;
+        Ok(body)
+    } else {
+        read_bounded_body(&mut body_reader)
+    }
+}
+
+fn read_bounded_body(reader: &mut impl Read) -> Result<Vec<u8>, String> {
+    let mut body = Vec::new();
+    reader
+        .take((MAX_RESPONSE + 1) as u64)
+        .read_to_end(&mut body)
+        .map_err(|error| error.to_string())?;
+    if body.len() > MAX_RESPONSE {
+        return Err("DLNA response exceeds the allowed size".into());
+    }
+    Ok(body)
+}
+
+fn decode_chunked_body(reader: &mut impl Read) -> Result<Vec<u8>, String> {
+    let mut body = Vec::new();
+    let mut metadata_bytes = 0;
+    loop {
+        let line = read_http_line(reader, &mut metadata_bytes)?;
+        let size_text = std::str::from_utf8(&line)
+            .map_err(|_| "Malformed DLNA chunk size".to_string())?
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim();
+        let size = usize::from_str_radix(size_text, 16)
+            .map_err(|_| "Malformed DLNA chunk size".to_string())?;
+        if size == 0 {
+            loop {
+                if read_http_line(reader, &mut metadata_bytes)?.is_empty() {
+                    return Ok(body);
+                }
+            }
+        }
+        let new_length = body
+            .len()
+            .checked_add(size)
+            .filter(|length| *length <= MAX_RESPONSE)
+            .ok_or_else(|| "DLNA response exceeds the allowed size".to_string())?;
+        body.resize(new_length, 0);
+        reader
+            .read_exact(&mut body[new_length - size..])
+            .map_err(|error| error.to_string())?;
+        let mut terminator = [0_u8; 2];
+        reader
+            .read_exact(&mut terminator)
+            .map_err(|error| error.to_string())?;
+        if terminator != *b"\r\n" {
+            return Err("Malformed DLNA chunk terminator".into());
+        }
+    }
+}
+
+fn read_http_line(reader: &mut impl Read, metadata_bytes: &mut usize) -> Result<Vec<u8>, String> {
+    let mut line = Vec::new();
+    loop {
+        let mut byte = [0_u8; 1];
+        reader
+            .read_exact(&mut byte)
+            .map_err(|error| error.to_string())?;
+        *metadata_bytes = metadata_bytes
+            .checked_add(1)
+            .filter(|length| *length <= MAX_RESPONSE_HEADERS)
+            .ok_or_else(|| "DLNA chunk metadata exceeds the allowed size".to_string())?;
+        line.push(byte[0]);
+        if line.ends_with(b"\r\n") {
+            line.truncate(line.len() - 2);
+            return Ok(line);
+        }
+    }
 }
 
 use std::net::ToSocketAddrs;
@@ -596,5 +784,41 @@ mod tests {
         );
         assert!(value.contains("A&amp;B"));
         assert!(value.contains("0:01:05"));
+    }
+    #[test]
+    fn accepts_only_same_host_http_or_https_control_urls() {
+        let base = Url::parse("https://10.0.0.2:8443/device.xml").unwrap();
+        let xml = "<service><serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType><controlURL>/av</controlURL></service>\
+                   <service><serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType><controlURL>https://10.0.0.3/render</controlURL></service>";
+        let (av, rendering) = service_urls(xml, &base, "10.0.0.2");
+        assert_eq!(av.as_deref(), Some("https://10.0.0.2:8443/av"));
+        assert_eq!(rendering, None);
+        assert!(!trusted_endpoint(
+            &Url::parse("https://user@10.0.0.2/av").unwrap(),
+            "10.0.0.2"
+        ));
+    }
+    #[test]
+    fn reads_content_length_without_requiring_connection_close() {
+        let mut response =
+            Cursor::new(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhelloignored".to_vec());
+        assert_eq!(read_http_response(&mut response).unwrap(), b"hello");
+    }
+    #[test]
+    fn decodes_bounded_chunked_response() {
+        let mut response = Cursor::new(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4;kind=test\r\nWiki\r\n5\r\npedia\r\n0\r\nX-Test: yes\r\n\r\n"
+                .to_vec(),
+        );
+        assert_eq!(read_http_response(&mut response).unwrap(), b"Wikipedia");
+    }
+    #[test]
+    fn rejects_oversized_chunk_before_allocating_body() {
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n",
+            MAX_RESPONSE + 1
+        );
+        let error = read_http_response(&mut Cursor::new(response.into_bytes())).unwrap_err();
+        assert_eq!(error, "DLNA response exceeds the allowed size");
     }
 }
