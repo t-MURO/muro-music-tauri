@@ -123,6 +123,14 @@ fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
 fn show_item_in_folder(app: tauri::AppHandle, file_path: String) -> Result<(), String> {
     parity::desktop::show_item_in_folder(app, file_path)
 }
+#[tauri::command(rename_all = "camelCase")]
+async fn start_file_drag(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+    file_paths: Vec<String>,
+) -> Result<(), String> {
+    parity::desktop::start_file_drag(app, window, file_paths).await
+}
 #[derive(Clone, Serialize)]
 struct DragDropPayload {
     kind: &'static str,
@@ -281,6 +289,7 @@ pub fn run() {
             copy_image_to_clipboard,
             open_external,
             show_item_in_folder,
+            start_file_drag,
             parity::watched_folder::set_watched_folder,
             parity::watched_folder::scan_watched_folder,
             parity::watched_folder::watched_folder_status,

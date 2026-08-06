@@ -30,6 +30,7 @@ lofty = "0.19"
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 image = "0.25"
+drag = "2.1.1"
 sha2 = "0.10"
 hex = "0.4"
 rodio = { version = "0.19", features = ["symphonia-all"] }

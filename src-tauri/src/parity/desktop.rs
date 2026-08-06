@@ -2,8 +2,14 @@ use arboard::{Clipboard, ImageData};
 use image::{imageops::FilterType, RgbaImage};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::{borrow::Cow, fs, path::Path};
-use tauri::{AppHandle, Manager, Runtime};
+use std::{
+    borrow::Cow,
+    collections::HashSet,
+    fs,
+    path::{Path, PathBuf},
+    sync::mpsc::channel,
+};
+use tauri::{AppHandle, Manager, Runtime, Window};
 use tauri_plugin_opener::OpenerExt;
 use url::Url;
 
@@ -128,6 +134,55 @@ pub fn show_item_in_folder<R: Runtime>(app: AppHandle<R>, file_path: String) -> 
         .map_err(|error| error.to_string())
 }
 
+pub async fn start_file_drag<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    file_paths: Vec<String>,
+) -> Result<(), String> {
+    let mut seen = HashSet::new();
+    let mut files = Vec::new();
+    for value in file_paths.into_iter().take(1_000) {
+        let path = PathBuf::from(value);
+        if !path.is_absolute() {
+            continue;
+        }
+        let Ok(canonical) = path.canonicalize() else {
+            continue;
+        };
+        if canonical.is_file() && seen.insert(canonical.clone()) {
+            files.push(canonical);
+        }
+    }
+    if files.is_empty() {
+        return Err("No valid track files were provided for dragging".to_string());
+    }
+
+    let (sender, receiver) = channel();
+    app.run_on_main_thread(move || {
+        #[cfg(target_os = "linux")]
+        let raw_window = window.gtk_window();
+        #[cfg(not(target_os = "linux"))]
+        let raw_window: tauri::Result<Window<R>> = Ok(window.clone());
+
+        let result = match raw_window {
+            Ok(raw_window) => drag::start_drag(
+                &raw_window,
+                drag::DragItem::Files(files),
+                drag::Image::Raw(include_bytes!("../../icons/128x128.png").to_vec()),
+                |_result, _cursor_position| {},
+                drag::Options::default(),
+            )
+            .map_err(|error| error.to_string()),
+            Err(error) => Err(error.to_string()),
+        };
+        let _ = sender.send(result);
+    })
+    .map_err(|error| error.to_string())?;
+
+    receiver
+        .recv()
+        .map_err(|_| "Native file drag stopped unexpectedly".to_string())?
+}
 #[cfg(test)]
 mod tests {
     use super::is_allowed_external_host;
