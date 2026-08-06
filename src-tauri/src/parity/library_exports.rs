@@ -67,6 +67,15 @@ pub struct OrganizedLibraryExportResult {
     pub failures: Vec<OrganizedLibraryFailure>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OrganizedLibraryExportProgress {
+    phase: &'static str,
+    current: usize,
+    total: usize,
+    name: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum PlaylistSyncReason {
@@ -1244,11 +1253,15 @@ fn relative_slash(from: &Path, to: &Path) -> String {
     path_string(&result).replace('\\', "/")
 }
 
-fn export_organized_library_impl(
+fn export_organized_library_impl<F>(
     db_path: &str,
     destination_path: &str,
     use_as_current_library: bool,
-) -> Result<OrganizedLibraryExportResult, String> {
+    mut on_progress: F,
+) -> Result<OrganizedLibraryExportResult, String>
+where
+    F: FnMut(OrganizedLibraryExportProgress),
+{
     let mut conn = open_database(db_path)?;
     let current_root = effective_library_root(&conn)?;
     let tracks = load_organized_tracks(&conn)?;
@@ -1262,11 +1275,17 @@ fn export_organized_library_impl(
     let mut by_source = HashMap::<String, PathBuf>::new();
     let mut failures = Vec::new();
     let mut files_copied = 0;
-    for track in &tracks {
+    for (index, track) in tracks.iter().enumerate() {
         let source = resolve_stored_track_path(&track.stored_source_path, current_root.as_deref())?;
         let source_key = path_key(&source);
         if let Some(existing) = by_source.get(&source_key) {
             by_track.insert(track.id.clone(), existing.clone());
+            on_progress(OrganizedLibraryExportProgress {
+                phase: "music",
+                current: index + 1,
+                total: tracks.len(),
+                name: Some(playlist_text(track.title.as_deref(), "Unknown Track")),
+            });
             continue;
         }
         let artist = sanitize_export_segment(album_artist_or_artist(track), "Unknown Artist");
@@ -1294,6 +1313,12 @@ fn export_organized_library_impl(
                 message,
             }),
         }
+        on_progress(OrganizedLibraryExportProgress {
+            phase: "music",
+            current: index + 1,
+            total: tracks.len(),
+            name: Some(playlist_text(track.title.as_deref(), "Unknown Track")),
+        });
     }
     let entries_by_playlist = playlist_entries.into_iter().fold(
         HashMap::<String, Vec<String>>::new(),
@@ -1312,7 +1337,7 @@ fn export_organized_library_impl(
     let mut used_playlists = HashSet::new();
     let mut playlist_entries_exported = 0;
     let mut playlist_entries_missing = 0;
-    for playlist in &playlists {
+    for (index, playlist) in playlists.iter().enumerate() {
         let directory = playlist
             .folder_id
             .as_ref()
@@ -1354,6 +1379,12 @@ fn export_organized_library_impl(
             fs::create_dir_all(parent).map_err(io_error)?;
         }
         fs::write(&playlist_path, format!("{}\r\n", lines.join("\r\n"))).map_err(io_error)?;
+        on_progress(OrganizedLibraryExportProgress {
+            phase: "playlists",
+            current: index + 1,
+            total: playlists.len(),
+            name: Some(playlist_text(Some(&playlist.name), "Playlist")),
+        });
     }
     let mut library_switched = false;
     let mut switch_error = None;
@@ -1785,12 +1816,24 @@ pub fn export_itunes_library(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn export_organized_library(
+pub async fn export_organized_library(
+    app: AppHandle,
     db_path: String,
     destination_path: String,
     use_as_current_library: bool,
 ) -> Result<OrganizedLibraryExportResult, String> {
-    export_organized_library_impl(&db_path, &destination_path, use_as_current_library)
+    tauri::async_runtime::spawn_blocking(move || {
+        export_organized_library_impl(
+            &db_path,
+            &destination_path,
+            use_as_current_library,
+            |progress| {
+                let _ = app.emit("muro://library-export-progress", progress);
+            },
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1931,6 +1974,7 @@ mod tests {
             &path_string(&db_path),
             &path_string(&destination),
             false,
+            |_| {},
         )
         .unwrap();
         let export = PathBuf::from(result.export_root);
