@@ -1,25 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen, type UnlistenFn } from "@muro/desktop/events";
 import { useDragSession } from "../contexts/DragSessionContext";
 
 /**
  * Hook for handling native file drag-and-drop from the OS.
- * 
- * This hook listens for Tauri's native drag events and shows an overlay
+ *
+ * This hook listens for native desktop drag events and shows an overlay
  * when files are dragged over the window. It automatically ignores
  * drag events during internal drags (playlist, columns, etc.) by
  * checking with the DragSession context.
- * 
+ *
  * @param onImport - Callback when files are dropped
  * @returns { isDragging, nativeDropStatus }
  */
 export const useNativeDrag = (onImport: (paths: string[]) => void) => {
   const { isNativeFileDragAllowed } = useDragSession();
-  
+
   const [isDragging, setIsDragging] = useState(false);
   const [nativeDropStatus, setNativeDropStatus] = useState<string | null>(null);
-  
+
   const nativeDropTimerRef = useRef<number | null>(null);
   const setupCompleteRef = useRef(false);
   const wasShowingOverlayRef = useRef(false);
@@ -45,7 +44,7 @@ export const useNativeDrag = (onImport: (paths: string[]) => void) => {
 
   const showStatus = useCallback((message: string, duration = 2000) => {
     if (typeof window === "undefined") return;
-    
+
     if (nativeDropTimerRef.current !== null) {
       window.clearTimeout(nativeDropTimerRef.current);
     }
@@ -68,7 +67,7 @@ export const useNativeDrag = (onImport: (paths: string[]) => void) => {
     };
   }, []);
 
-  // Set up Tauri native drag listener
+  // Set up the native drag listener
   useEffect(() => {
     if (setupCompleteRef.current) return;
     setupCompleteRef.current = true;
@@ -76,13 +75,6 @@ export const useNativeDrag = (onImport: (paths: string[]) => void) => {
     let unlisten: UnlistenFn | null = null;
 
     const setup = async () => {
-      // Check if we're in Tauri environment
-      try {
-        getCurrentWindow();
-      } catch {
-        return;
-      }
-
       try {
         unlisten = await listen<{ kind: string; paths: string[] }>(
           "muro://native-drag",

@@ -15,6 +15,14 @@ export type CurrentTrack = {
   coverArtThumbPath?: string;
 };
 
+export type TransitionUiState = {
+  status: "armed" | "active" | "completed" | "cancelled";
+  fromId: string;
+  toId: string;
+  toTitle: string;
+  progress: number;
+};
+
 type PlaybackState = {
   isPlaying: boolean;
   currentTrack: CurrentTrack | null;
@@ -24,6 +32,8 @@ type PlaybackState = {
   shuffleEnabled: boolean;
   repeatMode: RepeatMode;
   queue: string[];
+  playingNext: string[];
+  transition: TransitionUiState | null;
 };
 
 type PlaybackActions = {
@@ -33,6 +43,7 @@ type PlaybackActions = {
   setCurrentPosition: (position: number) => void;
   setDuration: (duration: number) => void;
   setVolume: (volume: number) => void;
+  setTransition: (transition: TransitionUiState | null) => void;
 
   // Mode toggles
   toggleShuffle: () => void;
@@ -47,6 +58,9 @@ type PlaybackActions = {
   removeFromQueue: (index: number) => void;
   clearQueue: () => void;
   reorderQueue: (fromIndex: number, toIndex: number) => void;
+  setPlayingNext: (trackIds: string[] | ((prev: string[]) => string[])) => void;
+  reorderPlayingNext: (fromIndex: number, toIndex: number) => void;
+  movePlayingNextToQueue: (fromIndex: number, toIndex: number) => void;
 
   // Reset
   reset: () => void;
@@ -63,6 +77,8 @@ const initialState: PlaybackState = {
   shuffleEnabled: false,
   repeatMode: "off",
   queue: [],
+  playingNext: [],
+  transition: null,
 };
 
 export const usePlaybackStore = create<PlaybackStore>()(
@@ -75,6 +91,7 @@ export const usePlaybackStore = create<PlaybackStore>()(
     setCurrentPosition: (currentPosition) => set({ currentPosition }),
     setDuration: (duration) => set({ duration }),
     setVolume: (volume) => set({ volume }),
+    setTransition: (transition) => set({ transition }),
 
     // Mode toggles
     toggleShuffle: () => set((state) => ({ shuffleEnabled: !state.shuffleEnabled })),
@@ -113,6 +130,30 @@ export const usePlaybackStore = create<PlaybackStore>()(
         const [removed] = newQueue.splice(fromIndex, 1);
         newQueue.splice(toIndex, 0, removed);
         return { queue: newQueue };
+      }),
+
+    setPlayingNext: (trackIds) =>
+      set((state) => ({
+        playingNext: typeof trackIds === "function" ? trackIds(state.playingNext) : trackIds,
+      })),
+
+    reorderPlayingNext: (fromIndex, toIndex) =>
+      set((state) => {
+        const nextTracks = [...state.playingNext];
+        const [removed] = nextTracks.splice(fromIndex, 1);
+        nextTracks.splice(toIndex, 0, removed);
+        return { playingNext: nextTracks };
+      }),
+
+    movePlayingNextToQueue: (fromIndex, toIndex) =>
+      set((state) => {
+        if (fromIndex < 0 || fromIndex >= state.playingNext.length) return state;
+        const nextTracks = [...state.playingNext];
+        const [movedTrackId] = nextTracks.splice(fromIndex, 1);
+        const nextQueue = [...state.queue];
+        const resolvedIndex = Math.max(0, Math.min(toIndex, nextQueue.length));
+        nextQueue.splice(resolvedIndex, 0, movedTrackId);
+        return { playingNext: nextTracks, queue: nextQueue };
       }),
 
     // Reset

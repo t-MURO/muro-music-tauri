@@ -1,17 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useDragSession } from "../contexts/DragSessionContext";
+import { startFileDrag } from "../desktop/runtime";
+import type { Track } from "../types";
 
 /**
- * Hook for dragging tracks to playlists.
- * 
- * Uses mouse events (not HTML5 drag) for full control.
- * Registers with the DragSession to prevent conflicts with native file drops.
- * 
- * Usage:
- * 1. Attach onRowMouseDown to track rows
- * 2. When user drags 4+ pixels, drag starts
- * 3. Drag indicator follows cursor
- * 4. Drop on playlist targets (data-playlist-target attribute)
+ * Coordinates track drags both inside Muro Music and out to the desktop.
+ * Electron receives the original source paths, so Explorer and other desktop
+ * applications see the selection as real files rather than app-only data.
  */
 
 type DragIndicator = {
@@ -21,28 +16,31 @@ type DragIndicator = {
 };
 
 type UsePlaylistDragArgs = {
+  tracks: Track[];
   selectedIds: Set<string>;
   onDropToPlaylist: (playlistId: string, payload?: string[]) => void;
 };
 
 export const usePlaylistDrag = ({
+  tracks,
   selectedIds,
   onDropToPlaylist,
 }: UsePlaylistDragArgs) => {
-  const { startInternalDrag, endInternalDrag, isInternalDrag } = useDragSession();
-  
+  const { startInternalDrag, endInternalDrag, isInternalDrag, markAsInternalDrag } =
+    useDragSession();
+
   const [draggingPlaylistId, setDraggingPlaylistId] = useState<string | null>(null);
   const [dragIndicator, setDragIndicator] = useState<DragIndicator | null>(null);
-  
-  // Refs for values that need to be accessed in event handlers
+
   const dragPayloadRef = useRef<string[]>([]);
-  const dragStartRef = useRef<{ x: number; y: number } | null>(null);
-  const dragCandidateRef = useRef<string[]>([]);
-  const isDraggingRef = useRef(false);
+  const tracksRef = useRef(tracks);
   const selectedIdsRef = useRef(selectedIds);
   const onDropToPlaylistRef = useRef(onDropToPlaylist);
 
-  // Keep refs in sync
+  useEffect(() => {
+    tracksRef.current = tracks;
+  }, [tracks]);
+
   useEffect(() => {
     selectedIdsRef.current = selectedIds;
   }, [selectedIds]);
@@ -52,38 +50,63 @@ export const usePlaylistDrag = ({
   }, [onDropToPlaylist]);
 
   const resetDragState = useCallback(() => {
-    dragStartRef.current = null;
-    dragCandidateRef.current = [];
     dragPayloadRef.current = [];
-    isDraggingRef.current = false;
     setDragIndicator(null);
     setDraggingPlaylistId(null);
     endInternalDrag();
   }, [endInternalDrag]);
 
-  /**
-   * Attach to track rows to start drag on mousedown.
-   */
-  const onRowMouseDown = useCallback(
-    (event: React.MouseEvent, trackId: string) => {
-      event.preventDefault();
+  const onRowDragStart = useCallback(
+    (event: React.DragEvent<HTMLDivElement>, trackId: string) => {
+      const currentTracks = tracksRef.current;
       const currentSelectedIds = selectedIdsRef.current;
-      
-      // If clicking on a selected track, drag all selected
-      // Otherwise, drag just this track
-      dragCandidateRef.current = currentSelectedIds.has(trackId)
-        ? Array.from(currentSelectedIds)
-        : [trackId];
-      
-      dragStartRef.current = {
+      const draggedTracks = currentSelectedIds.has(trackId)
+        ? currentTracks.filter((track) => currentSelectedIds.has(track.id))
+        : currentTracks.filter((track) => track.id === trackId);
+      const availableTracks = draggedTracks.filter(
+        (track) => !track.isMissing && Boolean(track.sourcePath.trim())
+      );
+
+      if (availableTracks.length === 0) {
+        event.preventDefault();
+        return;
+      }
+
+      // Electron owns the drag loop from this point. Letting Chromium start
+      // its HTML drag as well can create overlapping native drag sessions on
+      // Windows and terminate the process inside webContents.startDrag().
+      event.preventDefault();
+
+      const trackIds = availableTracks.map((track) => track.id);
+      dragPayloadRef.current = trackIds;
+      startInternalDrag("tracks");
+      markAsInternalDrag(event.dataTransfer);
+      event.dataTransfer.setData("text/plain", trackIds.join(","));
+      event.dataTransfer.effectAllowed = "copy";
+      setDragIndicator({
         x: event.clientX,
         y: event.clientY,
-      };
+        count: trackIds.length,
+      });
+
+      startFileDrag(availableTracks.map((track) => track.sourcePath));
     },
-    []
+    [markAsInternalDrag, startInternalDrag]
   );
 
-  // These are kept for compatibility but not really needed with mouse-based drag
+  const onRowDrag = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    // Chromium sometimes emits a final drag event at 0,0; keep the last useful
+    // position so the count badge does not jump to the corner.
+    if (event.clientX === 0 && event.clientY === 0) return;
+    setDragIndicator((current) =>
+      current ? { ...current, x: event.clientX, y: event.clientY } : current
+    );
+  }, []);
+
+  const onRowDragEnd = useCallback(() => {
+    resetDragState();
+  }, [resetDragState]);
+
   const onPlaylistDragEnter = useCallback((id: string) => {
     setDraggingPlaylistId(id);
   }, []);
@@ -99,80 +122,17 @@ export const usePlaylistDrag = ({
   const onPlaylistDropEvent = useCallback(
     (event: React.DragEvent<HTMLButtonElement>, playlistId: string) => {
       const data = event.dataTransfer.getData("text/plain");
-      const payload = data ? data.split(",").map((item) => item.trim()) : [];
+      const transferredPayload = data
+        ? data.split(",").map((item) => item.trim()).filter(Boolean)
+        : [];
+      const payload = transferredPayload.length > 0
+        ? transferredPayload
+        : dragPayloadRef.current;
       onDropToPlaylistRef.current(playlistId, payload);
       resetDragState();
     },
     [resetDragState]
   );
-
-  // Mouse move/up handlers for drag
-  useEffect(() => {
-    const handleMouseMove = (event: MouseEvent) => {
-      if (!dragStartRef.current) return;
-
-      const distance = Math.hypot(
-        event.clientX - dragStartRef.current.x,
-        event.clientY - dragStartRef.current.y
-      );
-
-      // Start drag after 4px movement
-      if (!isDraggingRef.current && distance > 4) {
-        isDraggingRef.current = true;
-        dragPayloadRef.current = dragCandidateRef.current;
-        startInternalDrag("playlist");
-        setDragIndicator({
-          x: event.clientX,
-          y: event.clientY,
-          count: dragCandidateRef.current.length,
-        });
-      }
-
-      // Update drag indicator position
-      if (isDraggingRef.current) {
-        setDragIndicator((current) =>
-          current
-            ? { ...current, x: event.clientX, y: event.clientY }
-            : {
-                x: event.clientX,
-                y: event.clientY,
-                count: dragPayloadRef.current.length,
-              }
-        );
-
-        // Find playlist drop target under cursor
-        const target = document
-          .elementFromPoint(event.clientX, event.clientY)
-          ?.closest?.("[data-playlist-target]") as HTMLElement | null;
-        setDraggingPlaylistId(
-          target ? target.getAttribute("data-playlist-target") : null
-        );
-      }
-    };
-
-    const handleMouseUp = (event: MouseEvent) => {
-      if (isDraggingRef.current) {
-        // Find playlist drop target under cursor
-        const target = document
-          .elementFromPoint(event.clientX, event.clientY)
-          ?.closest?.("[data-playlist-target]") as HTMLElement | null;
-        const playlistId = target?.getAttribute("data-playlist-target") ?? "";
-        
-        if (playlistId) {
-          onDropToPlaylistRef.current(playlistId, dragPayloadRef.current);
-        }
-      }
-
-      resetDragState();
-    };
-
-    window.addEventListener("mousemove", handleMouseMove);
-    window.addEventListener("mouseup", handleMouseUp);
-    return () => {
-      window.removeEventListener("mousemove", handleMouseMove);
-      window.removeEventListener("mouseup", handleMouseUp);
-    };
-  }, [resetDragState, startInternalDrag]);
 
   return {
     dragIndicator,
@@ -182,6 +142,8 @@ export const usePlaylistDrag = ({
     onPlaylistDragLeave,
     onPlaylistDragOver,
     onPlaylistDropEvent,
-    onRowMouseDown,
+    onRowDragStart,
+    onRowDrag,
+    onRowDragEnd,
   };
 };

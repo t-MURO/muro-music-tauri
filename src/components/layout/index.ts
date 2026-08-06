@@ -4,3 +4,6 @@ export { PlayerBar } from "./PlayerBar";
 export { QueuePanel } from "./QueuePanel";
 export { SettingsPanel } from "./SettingsPanel";
 export { Sidebar } from "./Sidebar";
+export { WindowChrome } from "./WindowChrome";
+export { LibraryDataTools } from "./LibraryDataTools";
+export { KeyboardShortcutSettings } from "./KeyboardShortcutSettings";

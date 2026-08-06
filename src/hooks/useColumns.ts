@@ -38,6 +38,12 @@ export const useColumns = ({ tracks }: UseColumnsArgs) => {
       const maxLength = Math.max(
         t(column.labelKey as typeof column.labelKey).length,
         ...tracks.map((track) => {
+          if (key === "format") {
+            const pathParts = track.sourcePath.split(/[\\/]/);
+            const filename = pathParts[pathParts.length - 1] ?? "";
+            const extensionParts = filename.split(".");
+            return filename.includes(".") ? (extensionParts[extensionParts.length - 1]?.length ?? 0) : 0;
+          }
           const value = track[key as keyof Track];
           return value === undefined || value === null ? 0 : String(value).length;
         })

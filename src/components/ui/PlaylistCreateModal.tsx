@@ -8,6 +8,10 @@ type PlaylistCreateModalProps = {
   onChange: (value: string) => void;
   onClose: () => void;
   onSubmit: () => void;
+  title?: string;
+  subtitle?: string;
+  placeholder?: string;
+  submitLabel?: string;
 };
 
 export const PlaylistCreateModal = ({
@@ -16,6 +20,10 @@ export const PlaylistCreateModal = ({
   onChange,
   onClose,
   onSubmit,
+  title,
+  subtitle,
+  placeholder,
+  submitLabel,
 }: PlaylistCreateModalProps) => {
   const inputRef = useRef<HTMLInputElement | null>(null);
 
@@ -62,10 +70,10 @@ export const PlaylistCreateModal = ({
         onClick={(event) => event.stopPropagation()}
       >
         <h2 className="text-[var(--font-size-md)] font-semibold text-[var(--color-text-primary)]">
-          {t("playlist.create.title")}
+          {title ?? t("playlist.create.title")}
         </h2>
         <p className="mt-[var(--spacing-xs)] text-[var(--font-size-xs)] text-[var(--color-text-muted)]">
-          {t("playlist.create.subtitle")}
+          {subtitle ?? t("playlist.create.subtitle")}
         </p>
         <form
           className="mt-[var(--spacing-md)] space-y-[var(--spacing-md)]"
@@ -77,7 +85,7 @@ export const PlaylistCreateModal = ({
           <input
             ref={inputRef}
             className="w-full rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-[var(--spacing-md)] py-[var(--spacing-sm)] text-[var(--font-size-sm)] text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]"
-            placeholder={t("playlist.create.placeholder")}
+            placeholder={placeholder ?? t("playlist.create.placeholder")}
             value={value}
             onChange={(event) => onChange(event.target.value)}
             type="text"
@@ -95,7 +103,7 @@ export const PlaylistCreateModal = ({
               disabled={!value.trim()}
               type="submit"
             >
-              {t("playlist.create.submit")}
+              {submitLabel ?? t("playlist.create.submit")}
             </button>
           </div>
         </form>

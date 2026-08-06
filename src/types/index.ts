@@ -1,1 +1,16 @@
-export type { Track, TrackMetadataUpdates, Playlist, ColumnKey, ColumnConfig } from "./library";
+export type {
+  ArtistCredit,
+  Track,
+  TrackMetadataUpdates,
+  Playlist,
+  PlaylistFolder,
+  ArtistProfile,
+  ArtistImageCandidate,
+  AlbumCoverCandidate,
+  SmartCrate,
+  SmartCrateField,
+  SmartCrateOperator,
+  SmartCrateRule,
+  ColumnKey,
+  ColumnConfig,
+} from "./library";

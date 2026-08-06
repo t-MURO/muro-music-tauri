@@ -1,13 +1,28 @@
 import { useEffect, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { usePlaybackStore, useRecentlyPlayedStore, useSettingsStore } from "../stores";
+import { invoke } from "@muro/desktop/runtime";
+import {
+  useLibraryStore,
+  usePlaybackStore,
+  useRecentlyPlayedStore,
+  useSettingsStore,
+} from "../stores";
 import type { Track } from "../types";
 
 const PLAY_THRESHOLD_SECONDS = 30;
+const SYNC_INTERVAL_SECONDS = 10;
 
 type UsePlayTrackingArgs = {
   currentPosition: number;
   allTracks: Track[];
+};
+
+type ActiveSession = {
+  trackId: string | null;
+  accumulated: number;
+  lastPosition: number;
+  lastSynced: number;
+  historyId: number | null;
+  recording: boolean;
 };
 
 export const usePlayTracking = ({
@@ -17,83 +32,109 @@ export const usePlayTracking = ({
   const currentTrack = usePlaybackStore((s) => s.currentTrack);
   const isPlaying = usePlaybackStore((s) => s.isPlaying);
   const dbPath = useSettingsStore((s) => s.dbPath);
-
-  const playSessionTrackId = useRecentlyPlayedStore((s) => s.playSessionTrackId);
-  const hasRecordedPlay = useRecentlyPlayedStore((s) => s.hasRecordedPlay);
+  const setTracks = useLibraryStore((s) => s.setTracks);
+  const setInboxTracks = useLibraryStore((s) => s.setInboxTracks);
   const startPlaySession = useRecentlyPlayedStore((s) => s.startPlaySession);
   const markPlayRecorded = useRecentlyPlayedStore((s) => s.markPlayRecorded);
   const addRecentlyPlayed = useRecentlyPlayedStore((s) => s.addRecentlyPlayed);
+  const sessionRef = useRef<ActiveSession>({
+    trackId: null,
+    accumulated: 0,
+    lastPosition: 0,
+    lastSynced: 0,
+    historyId: null,
+    recording: false,
+  });
+  const dbPathRef = useRef(dbPath);
+  dbPathRef.current = dbPath;
 
-  // Track accumulated play time using refs to handle seeks correctly
-  const accumulatedTimeRef = useRef(0);
-  const lastPositionRef = useRef(0);
-  const lastTrackIdRef = useRef<string | null>(null);
+  const flushSession = (session: ActiveSession) => {
+    if (!session.historyId || session.accumulated <= session.lastSynced) return;
+    session.lastSynced = session.accumulated;
+    invoke("update_play_history", {
+      dbPath: dbPathRef.current,
+      historyId: session.historyId,
+      listenedSeconds: session.accumulated,
+    }).catch((error) => console.error("Failed to update listening history:", error));
+  };
 
-  // Reset tracking when track changes
+  useEffect(() => () => flushSession(sessionRef.current), []);
+
   useEffect(() => {
-    if (!currentTrack) {
-      lastTrackIdRef.current = null;
-      accumulatedTimeRef.current = 0;
-      lastPositionRef.current = 0;
+    const trackId = currentTrack?.id ?? null;
+    const session = sessionRef.current;
+    if (trackId !== session.trackId) {
+      flushSession(session);
+      sessionRef.current = {
+        trackId,
+        accumulated: 0,
+        lastPosition: currentPosition,
+        lastSynced: 0,
+        historyId: null,
+        recording: false,
+      };
+      if (trackId) startPlaySession(trackId);
       return;
     }
+    session.lastPosition = currentPosition;
+  }, [currentTrack?.id, startPlaySession]);
 
-    if (currentTrack.id !== lastTrackIdRef.current) {
-      lastTrackIdRef.current = currentTrack.id;
-      accumulatedTimeRef.current = 0;
-      lastPositionRef.current = currentPosition;
-      startPlaySession(currentTrack.id);
-    }
-  }, [currentTrack, currentPosition, startPlaySession]);
-
-  // Track play time
   useEffect(() => {
-    if (!currentTrack || !isPlaying || hasRecordedPlay) {
-      return;
-    }
+    const session = sessionRef.current;
+    if (!currentTrack || currentTrack.id !== session.trackId) return;
+    const delta = currentPosition - session.lastPosition;
+    session.lastPosition = currentPosition;
+    if (!isPlaying) return;
+    if (delta > 0 && delta < 2) session.accumulated += delta;
 
-    // Calculate time delta since last update
-    const delta = currentPosition - lastPositionRef.current;
-    lastPositionRef.current = currentPosition;
-
-    // Only count small positive deltas (normal playback, not seeks)
-    // A seek would result in a large positive or negative delta
-    if (delta > 0 && delta < 2) {
-      accumulatedTimeRef.current += delta;
-    }
-
-    // Check if we've hit the threshold
     if (
-      accumulatedTimeRef.current >= PLAY_THRESHOLD_SECONDS &&
-      currentTrack.id === playSessionTrackId &&
-      !hasRecordedPlay
+      session.accumulated >= PLAY_THRESHOLD_SECONDS
+      && !session.historyId
+      && !session.recording
     ) {
-      // Record the play
+      session.recording = true;
       markPlayRecorded();
-
-      // Find the full track data to add to recently played
-      const track = allTracks.find((t) => t.id === currentTrack.id);
+      const track = allTracks.find((candidate) => candidate.id === currentTrack.id);
       if (track) {
-        addRecentlyPlayed(track);
+        const playedAt = new Date().toISOString();
+        const applyRecordedPlay = (candidate: Track): Track => candidate.id === track.id
+          ? {
+              ...candidate,
+              lastPlayedAt: playedAt,
+              playCount: (candidate.playCount || 0) + 1,
+            }
+          : candidate;
+        addRecentlyPlayed(track, playedAt);
+        setTracks((items) => items.map(applyRecordedPlay));
+        setInboxTracks((items) => items.map(applyRecordedPlay));
       }
-
-      // Update database
-      invoke("record_track_play", {
+      invoke<{ historyId: number }>("record_track_play", {
         dbPath,
         trackId: currentTrack.id,
+      }).then((result) => {
+        session.historyId = result.historyId;
+        session.lastSynced = PLAY_THRESHOLD_SECONDS;
+        flushSession(session);
       }).catch((error) => {
+        session.recording = false;
         console.error("Failed to record track play:", error);
       });
+      return;
     }
+
+    if (
+      session.historyId
+      && session.accumulated - session.lastSynced >= SYNC_INTERVAL_SECONDS
+    ) flushSession(session);
   }, [
-    currentTrack,
-    currentPosition,
-    isPlaying,
-    hasRecordedPlay,
-    playSessionTrackId,
-    dbPath,
-    markPlayRecorded,
     addRecentlyPlayed,
     allTracks,
+    currentPosition,
+    currentTrack,
+    dbPath,
+    isPlaying,
+    markPlayRecorded,
+    setInboxTracks,
+    setTracks,
   ]);
 };

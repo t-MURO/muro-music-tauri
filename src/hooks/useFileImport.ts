@@ -1,10 +1,19 @@
-import { listen } from "@tauri-apps/api/event";
+import { listen } from "@muro/desktop/events";
 import { useCallback, useEffect, useRef } from "react";
 import { commandManager, type Command } from "../command-manager/commandManager";
-import { useLibraryStore, useUIStore, notify } from "../stores";
+import { useLibraryStore, useSettingsStore, useUIStore, notify } from "../stores";
 import { useDbPath } from "./useDbPath";
-import { addTracksToPlaylist, createPlaylist, removeLastTracksFromPlaylist, importFiles, importedTrackToTrack } from "../utils";
+import {
+  createPlaylist,
+  deletePlaylist,
+  deleteTracks,
+  importFiles,
+  importedTrackToTrack,
+  listPlaylistFiles,
+  setPlaylistTracks,
+} from "../utils";
 import type { Playlist } from "../types";
+import { t } from "../i18n";
 
 export type ImportProgress = {
   imported: number;
@@ -20,9 +29,13 @@ export type PlaylistDropOperation = {
 
 type UseFileImportArgs = {
   onImportComplete?: () => void;
+  onPlaylistFolderDetected?: (directoryPath: string) => Promise<void>;
 };
 
-export const useFileImport = ({ onImportComplete }: UseFileImportArgs = {}) => {
+export const useFileImport = ({
+  onImportComplete,
+  onPlaylistFolderDetected,
+}: UseFileImportArgs = {}) => {
   const playlistSequenceRef = useRef(0);
   const clearProgressTimerRef = useRef<number | null>(null);
 
@@ -33,6 +46,7 @@ export const useFileImport = ({ onImportComplete }: UseFileImportArgs = {}) => {
   const pendingPlaylistDrop = useUIStore((s) => s.pendingPlaylistDrop);
   const setPendingPlaylistDrop = useUIStore((s) => s.setPendingPlaylistDrop);
   const setImportProgress = useUIStore((s) => s.setImportProgress);
+  const watchedFolder = useSettingsStore((s) => s.watchedFolder);
 
   // Ref to access current pending drop
   const pendingPlaylistDropRef = useRef<PlaylistDropOperation | null>(null);
@@ -43,42 +57,62 @@ export const useFileImport = ({ onImportComplete }: UseFileImportArgs = {}) => {
   const executePlaylistDrop = useCallback(
     async (playlistId: string, payload: string[]) => {
       const resolvedDbPath = await resolveDbPath();
-      const trackCount = payload.length;
 
       // Capture the current state before executing
       const playlist = playlists.find((p: Playlist) => p.id === playlistId);
       if (!playlist) {
         return;
       }
+      if (playlist.sourcePath) {
+        notify.info(t("toast.playlist.sourceManaged", { name: playlist.name }));
+        return;
+      }
       const previousIds = [...playlist.trackIds];
-      const nextIds = [...previousIds, ...payload];
+      const previousSet = new Set(previousIds);
+      const novelIds = [...new Set(payload)].filter((trackId) => !previousSet.has(trackId));
+      if (novelIds.length === 0) {
+        notify.info(t("history.playlist.noneAdded", { name: playlist.name }));
+        return;
+      }
+      const nextIds = [...previousIds, ...novelIds];
 
       const command: Command = {
-        label: `Add ${trackCount} tracks to playlist`,
-        do: () => {
+        label: `Add ${novelIds.length} tracks to playlist`,
+        do: async () => {
+          await setPlaylistTracks(resolvedDbPath, playlistId, nextIds);
           setPlaylists((current) =>
             current.map((p) =>
               p.id === playlistId ? { ...p, trackIds: nextIds } : p
             )
           );
-          // Persist to database
-          addTracksToPlaylist(resolvedDbPath, playlistId, payload).catch(() => {
-            notify.error("Failed to add tracks to playlist");
-          });
+          return t(
+            novelIds.length === 1
+              ? "history.playlist.added.one"
+              : "history.playlist.added.many",
+            { count: String(novelIds.length), name: playlist.name },
+          );
         },
-        undo: () => {
+        undo: async () => {
+          await setPlaylistTracks(resolvedDbPath, playlistId, previousIds);
           setPlaylists((current) =>
             current.map((p) =>
               p.id === playlistId ? { ...p, trackIds: previousIds } : p
             )
           );
-          removeLastTracksFromPlaylist(resolvedDbPath, playlistId, trackCount).catch(() => {
-            notify.error("Failed to undo playlist changes");
-          });
+          return t(
+            previousIds.length === 1
+              ? "history.playlist.restoredCount.one"
+              : "history.playlist.restoredCount.many",
+            { count: String(previousIds.length), name: playlist.name },
+          );
         },
       };
 
-      commandManager.execute(command);
+      try {
+        await commandManager.execute(command);
+      } catch {
+        notify.error(t("toast.playlist.addFailed"));
+      }
     },
     [setPlaylists, resolveDbPath, playlists]
   );
@@ -136,9 +170,39 @@ export const useFileImport = ({ onImportComplete }: UseFileImportArgs = {}) => {
           clearProgressTimerRef.current = null;
         }
         setImportProgress({ imported: 0, total: 0, phase: "scanning" });
+        if (paths.length === 1 && onPlaylistFolderDetected) {
+          try {
+            const playlistScan = await listPlaylistFiles(paths[0]);
+            // A normal music folder can also contain exported playlists. In that
+            // case import its songs; reserve automatic playlist-folder routing
+            // for bundles that contain playlists but no audio of their own.
+            if (playlistScan.files.length > 0 && playlistScan.audioFileCount === 0) {
+              setImportProgress(null);
+              await onPlaylistFolderDetected(paths[0]);
+              return;
+            }
+          } catch {
+            // A regular audio file or folder continues through the normal importer.
+          }
+        }
+
         const resolvedDbPath = await resolveDbPath();
-        const imported = await importFiles(resolvedDbPath, paths);
+        const result = await importFiles(resolvedDbPath, paths, {
+          libraryFolder: watchedFolder,
+        });
+        const imported = result.imported;
         if (imported.length === 0) {
+          if (result.scanned === 0) {
+            notify.error(t("toast.import.noSupportedFiles"));
+          } else if (result.failures.length > 0) {
+            notify.error(
+              result.failures.length === 1
+                ? `Could not import ${result.failures[0].path.split(/[\\/]/).slice(-1)[0] || "audio file"}`
+                : `${result.failures.length} audio files could not be imported`
+            );
+          } else {
+            notify.success(t("toast.import.allKnown"));
+          }
           if (typeof window !== "undefined") {
             clearProgressTimerRef.current = window.setTimeout(() => {
               setImportProgress(null);
@@ -150,20 +214,56 @@ export const useFileImport = ({ onImportComplete }: UseFileImportArgs = {}) => {
           return;
         }
 
-        const convertedTracks = imported.map(importedTrackToTrack);
+        let currentImported = imported;
+        let convertedTracks = currentImported.map(importedTrackToTrack);
+        const importedSourcePaths = imported.map((track) => track.source_path);
         const command: Command = {
           label: `Import ${imported.length} tracks`,
-          do: () => {
+          do: async () => {
+            const redoResult = await importFiles(resolvedDbPath, importedSourcePaths, {
+              libraryFolder: watchedFolder,
+            });
+            if (
+              redoResult.failures.length > 0
+              || redoResult.imported.length !== importedSourcePaths.length
+            ) {
+              throw new Error(t("history.import.restoreFailed"));
+            }
+            currentImported = redoResult.imported;
+            convertedTracks = currentImported.map(importedTrackToTrack);
             setInboxTracks((current) => [...convertedTracks, ...current]);
+            return t(
+              currentImported.length === 1
+                ? "history.import.redone.one"
+                : "history.import.redone.many",
+              { count: String(currentImported.length) },
+            );
           },
-          undo: () => {
-            const ids = new Set(imported.map((track) => track.id));
+          undo: async () => {
+            const ids = currentImported.map((track) => track.id);
+            const result = await deleteTracks(resolvedDbPath, ids, false);
+            if (result.failures.length > 0 || result.deletedTrackIds.length !== ids.length) {
+              throw new Error(t("history.import.removeFailed"));
+            }
+            const deletedIds = new Set(result.deletedTrackIds);
             setInboxTracks((current) =>
-              current.filter((track) => !ids.has(track.id))
+              current.filter((track) => !deletedIds.has(track.id))
+            );
+            return t(
+              deletedIds.size === 1
+                ? "history.import.undone.one"
+                : "history.import.undone.many",
+              { count: String(deletedIds.size) },
             );
           },
         };
-        commandManager.execute(command);
+        setInboxTracks((current) => [...convertedTracks, ...current]);
+        await commandManager.recordExecuted(command);
+        if (result.failures.length > 0) {
+          notify.error(t("toast.import.someFailed", { count: String(result.failures.length) }));
+        } else {
+          notify.success(t("toast.import.succeeded", { count: String(imported.length) }));
+        }
         onImportComplete?.();
         if (typeof window !== "undefined") {
           clearProgressTimerRef.current = window.setTimeout(() => {
@@ -174,11 +274,18 @@ export const useFileImport = ({ onImportComplete }: UseFileImportArgs = {}) => {
           setImportProgress(null);
         }
       } catch (error) {
-        notify.error("Import failed");
+        notify.error(t("toast.import.failed"));
         setImportProgress(null);
       }
     },
-    [resolveDbPath, setImportProgress, setInboxTracks, onImportComplete]
+    [
+      resolveDbPath,
+      setImportProgress,
+      setInboxTracks,
+      onImportComplete,
+      onPlaylistFolderDetected,
+      watchedFolder,
+    ]
   );
 
   const handleCreatePlaylist = useCallback(
@@ -193,54 +300,45 @@ export const useFileImport = ({ onImportComplete }: UseFileImportArgs = {}) => {
         id: `playlist-${Date.now()}-${playlistSequenceRef.current}`,
         name: trimmed,
         trackIds: [],
+        sortOrder: playlists
+          .filter((item) => !item.folderId)
+          .reduce((highest, item) => Math.max(highest, item.sortOrder), -1) + 1,
       };
+      const resolvedDbPath = await resolveDbPath();
 
       const command: Command = {
         label: `Create playlist ${trimmed}`,
-        do: () => {
+        do: async () => {
+          await createPlaylist(
+            resolvedDbPath,
+            playlist.id,
+            playlist.name,
+            playlist.folderId,
+            playlist.sortOrder,
+          );
           setPlaylists((current) => [...current, playlist]);
+          return t("history.playlist.created", { name: playlist.name });
         },
-        undo: () => {
+        undo: async () => {
+          await deletePlaylist(resolvedDbPath, playlist.id);
           setPlaylists((current) =>
             current.filter((item) => item.id !== playlist.id)
           );
+          return t("history.playlist.undidCreate", { name: playlist.name });
         },
       };
 
-      commandManager.execute(command);
-
       try {
-        const resolvedDbPath = await resolveDbPath();
-        await createPlaylist(resolvedDbPath, playlist.id, playlist.name);
+        await commandManager.execute(command);
       } catch (error) {
-        notify.error("Failed to create playlist");
+        notify.error(t("toast.playlist.createFailed"));
       }
     },
-    [resolveDbPath, setPlaylists]
+    [playlists, resolveDbPath, setPlaylists]
   );
 
-  // Undo/Redo keyboard handler
-  useEffect(() => {
-    const handleUndoRedo = (event: KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey)) {
-        return;
-      }
-      const key = event.key.toLowerCase();
-      if (key !== "z" && key !== "y") {
-        return;
-      }
-
-      event.preventDefault();
-      if (key === "y" || event.shiftKey) {
-        commandManager.redo();
-        return;
-      }
-      commandManager.undo();
-    };
-
-    window.addEventListener("keydown", handleUndoRedo);
-    return () => window.removeEventListener("keydown", handleUndoRedo);
-  }, []);
+  // Undo/redo is bound globally in useKeyboardShortcuts, which also guards
+  // text fields so Cmd+Z keeps working inside inputs.
 
   // Import progress listener
   const importListenerSetupRef = useRef(false);
@@ -282,7 +380,7 @@ export const useFileImport = ({ onImportComplete }: UseFileImportArgs = {}) => {
           }
         );
       } catch (error) {
-        notify.error("Failed to setup import progress listener");
+        notify.error(t("toast.import.listenerFailed"));
       }
     };
 

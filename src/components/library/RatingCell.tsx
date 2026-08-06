@@ -1,3 +1,4 @@
+import { Star } from "lucide-react";
 import { memo, useState } from "react";
 
 type RatingCellProps = {
@@ -5,22 +6,27 @@ type RatingCellProps = {
   title: string;
   rating: number;
   onRate: (id: string, rating: number) => void;
+  compact?: boolean;
 };
 
 export const RatingCell = memo(
-  ({ trackId, title, rating, onRate }: RatingCellProps) => {
+  ({ trackId, title, rating, onRate, compact = false }: RatingCellProps) => {
     const [hoverValue, setHoverValue] = useState<number | null>(null);
     const displayRating = hoverValue ?? rating;
 
     return (
       <div
-        className="flex h-[var(--table-row-height)] items-center px-[var(--spacing-md)]"
-        title={`${rating} / 5`}
+        className={compact
+          ? "flex min-w-0 items-center"
+          : "flex h-[var(--table-row-height)] min-w-0 items-center overflow-hidden border-l border-[var(--color-border-light)] px-1"}
+        title={`Rating: ${rating} / 5`}
         onMouseLeave={() => setHoverValue(null)}
-        role="cell"
+        data-rating-cell={compact ? undefined : true}
+        data-player-rating={compact ? true : undefined}
+        role={compact ? undefined : "cell"}
       >
         <div
-          className="flex items-center gap-1 rounded-[var(--radius-sm)] -ml-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--color-accent)]"
+          className={`flex min-w-0 items-center rounded-[var(--radius-sm)] ${compact ? "justify-start" : "w-full justify-center"}`}
           aria-label={`Rating for ${title}`}
           role="slider"
           tabIndex={0}
@@ -38,8 +44,14 @@ export const RatingCell = memo(
               event.preventDefault();
               onRate(trackId, rating - step);
             }
-            if (event.key === "Home") {
+            if (
+              event.key === "Home" ||
+              event.key === "0" ||
+              event.key === "Backspace" ||
+              event.key === "Delete"
+            ) {
               event.preventDefault();
+              setHoverValue(null);
               onRate(trackId, 0);
             }
             if (event.key === "End") {
@@ -48,37 +60,28 @@ export const RatingCell = memo(
             }
           }}
         >
-          <button
-            aria-label="Clear rating"
-            className="flex h-5 w-5 items-center justify-center opacity-0"
-            onClick={(event) => {
-              event.stopPropagation();
-              onRate(trackId, 0);
-            }}
-            onMouseMove={() => setHoverValue(0)}
-            tabIndex={-1}
-            title="Clear rating"
-            type="button"
-          >
-            <svg className="h-5 w-5" viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"
-                fill="var(--color-text-muted)"
-              />
-            </svg>
-          </button>
           {[1, 2, 3, 4, 5].map((star) => {
             const fill = Math.max(0, Math.min(1, displayRating - (star - 1)));
             return (
               <button
                 key={star}
-                aria-hidden="true"
-                className="relative h-5 w-5 select-none focus:outline-none"
+                aria-label={rating === star ? "Clear rating" : `Set rating to ${star} stars`}
+                className="relative h-3.5 w-3.5 shrink-0 select-none text-[var(--color-text-muted)] focus:outline-none"
+                data-rating-star={star}
+                tabIndex={-1}
                 onClick={(event) => {
                   event.stopPropagation();
+                  if (rating === star) {
+                    setHoverValue(null);
+                    onRate(trackId, 0);
+                    return;
+                  }
                   const rect = event.currentTarget.getBoundingClientRect();
                   const isHalf = event.clientX - rect.left < rect.width / 2;
-                  onRate(trackId, isHalf ? star - 0.5 : star);
+                  const nextRating = isHalf ? star - 0.5 : star;
+                  const resolvedRating = nextRating === rating ? 0 : nextRating;
+                  if (resolvedRating === 0) setHoverValue(null);
+                  onRate(trackId, resolvedRating);
                 }}
                 onMouseMove={(event) => {
                   const rect = event.currentTarget.getBoundingClientRect();
@@ -87,18 +90,10 @@ export const RatingCell = memo(
                 }}
                 type="button"
               >
-                <svg className="h-5 w-5" viewBox="0 0 24 24" aria-hidden="true">
-                  <path
-                    d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"
-                    fill="var(--color-text-muted)"
-                    opacity="0.3"
-                  />
-                  <path
-                    d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"
-                    fill="var(--color-accent)"
-                    style={{ clipPath: `inset(0 ${(1 - fill) * 100}% 0 0)` }}
-                  />
-                </svg>
+                <Star className="absolute inset-0 h-3.5 w-3.5" strokeWidth={1.5} />
+                <span className="absolute inset-0 overflow-hidden text-[var(--color-rating-star)]" data-rating-fill style={{ width: `${fill * 100}%` }}>
+                  <Star className="h-3.5 w-3.5 max-w-none" fill="currentColor" strokeWidth={1.5} />
+                </span>
               </button>
             );
           })}

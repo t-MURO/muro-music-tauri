@@ -10,16 +10,16 @@ import {
 
 /**
  * Drag Session Context
- * 
+ *
  * Centralizes all drag state in the app, so internal drags (playlist, columns, etc.)
  * don't conflict with native file import drags from the OS.
- * 
+ *
  * Usage:
  * 1. Wrap your app in <DragSessionProvider>
  * 2. Call startInternalDrag("source") in onDragStart
  * 3. Call endInternalDrag() in onDragEnd
  * 4. Check isInternalDrag before handling native file drops
- * 
+ *
  * The dataTransfer marker (INTERNAL_DRAG_TYPE) can be used to verify
  * a drag is internal when receiving drops.
  */
@@ -38,7 +38,7 @@ type DragSession = {
   startInternalDrag: (source: DragSource) => void;
   /** End an internal drag - call this in onDragEnd */
   endInternalDrag: () => void;
-  /** 
+  /**
    * Check if native file drag should be allowed.
    * Returns false during internal drags and for a brief window after.
    */
@@ -64,7 +64,7 @@ type DragSessionProviderProps = {
 export const DragSessionProvider = ({ children }: DragSessionProviderProps) => {
   const [isInternalDrag, setIsInternalDrag] = useState(false);
   const [dragSource, setDragSource] = useState<DragSource | null>(null);
-  
+
   // Refs for synchronous access (avoids race conditions with native events)
   const isInternalDragRef = useRef(false);
   const suppressUntilRef = useRef(0);

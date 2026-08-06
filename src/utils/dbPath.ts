@@ -1,4 +1,4 @@
-import { appDataDir, join } from "@tauri-apps/api/path";
+import { appDataDir, join } from "@muro/desktop/paths";
 
 const DEFAULT_DB_FILENAME = "muro.db";
 

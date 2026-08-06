@@ -14,6 +14,7 @@ export { useAppPreferences } from "./useAppPreferences";
 export { useTrackRatings } from "./useTrackRatings";
 export { useTrackAnalysis } from "./useTrackAnalysis";
 export { useTrackEdit } from "./useTrackEdit";
+export { useTrackDeletion } from "./useTrackDeletion";
 export { useSidebarData } from "./useSidebarData";
 export { useDbPath } from "./useDbPath";
 export {
@@ -21,7 +22,11 @@ export {
   type AudioPlaybackState,
   type CurrentTrack,
 } from "./useAudioPlayback";
+export { useMixTransition } from "./useMixTransition";
 export { usePlaylistOperations } from "./usePlaylistOperations";
+export { usePlaylistFolders } from "./usePlaylistFolders";
+export { usePlaylistTransfer } from "./usePlaylistTransfer";
+export { useArtistProfiles, normalizeArtistProfileKey } from "./useArtistProfiles";
 export { useInboxOperations } from "./useInboxOperations";
 export {
   useFileImport,
@@ -32,10 +37,24 @@ export { usePlayTracking } from "./usePlayTracking";
 export {
   useViewConfig,
   type LibraryView,
+  type CollectionFacet,
   type ViewType,
   type EmptyStateConfig,
   type TrackTableConfig,
   type ViewConfig,
 } from "./useLibraryView";
 export { useLibraryInit } from "./useLibraryInit";
-export { useKeyboardShortcuts } from "./useKeyboardShortcuts";
+export { useOrganizedLibraryExport } from "./useOrganizedLibraryExport";
+export {
+  useKeyboardShortcuts,
+  type KeyboardShortcutHandlers,
+} from "./useKeyboardShortcuts";
+export { useCommandHistory } from "./useCommandHistory";
+export { useGaplessPlayback } from "./useGaplessPlayback";
+export { useIndexedSearch } from "./useIndexedSearch";
+export { useLoudnessAnalysis } from "./useLoudnessAnalysis";
+export {
+  useLibraryVerification,
+  type MissingTrack,
+} from "./useLibraryVerification";
+export { useWatchedFolders } from "./useWatchedFolders";

@@ -1,6 +1,6 @@
 import { forwardRef } from "react";
 import { Music2, X } from "lucide-react";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc } from "@muro/desktop/runtime";
 import type { Track } from "../../types";
 
 type QueueItemProps = {

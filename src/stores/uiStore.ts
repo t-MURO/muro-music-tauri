@@ -1,11 +1,18 @@
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
 import type { ColumnConfig } from "../types";
 import type { PlaylistDropOperation } from "../hooks/useFileImport";
+import {
+  DEFAULT_ADVANCED_TRACK_FILTERS,
+  type AdvancedTrackFilters,
+} from "../utils/trackFilters";
 
-type SortState = {
+export type SortState = {
   key: ColumnConfig["key"];
   direction: "asc" | "desc";
 } | null;
+
+type StoredSortState = Exclude<SortState, null>;
 
 type UIState = {
   // Selection
@@ -14,12 +21,16 @@ type UIState = {
 
   // Sorting
   sortState: SortState;
+  sortViewKey: string;
+  sortStates: Record<string, StoredSortState>;
 
   // Search
   searchQuery: string;
+  advancedTrackFilters: AdvancedTrackFilters;
 
   // Modals
   analysisTrackIds: string[];
+  isAnalysisModalMinimized: boolean;
   editTrackIds: string[];
   pendingPlaylistDrop: PlaylistDropOperation | null;
   isPlaylistModalOpen: boolean;
@@ -48,15 +59,22 @@ type UIActions = {
   clearSelection: () => void;
 
   // Sorting
+  activateSortView: (viewKey: string) => void;
   setSortState: (state: SortState) => void;
   toggleSort: (key: ColumnConfig["key"]) => void;
 
   // Search
   setSearchQuery: (query: string) => void;
+  setAdvancedTrackFilters: (
+    filters: AdvancedTrackFilters | ((current: AdvancedTrackFilters) => AdvancedTrackFilters),
+  ) => void;
+  resetAdvancedTrackFilters: () => void;
 
   // Analysis modal
   openAnalysisModal: (trackIds: string[]) => void;
   closeAnalysisModal: () => void;
+  minimizeAnalysisModal: () => void;
+  restoreAnalysisModal: () => void;
 
   // Edit modal
   openEditModal: (trackIds: string[]) => void;
@@ -81,13 +99,17 @@ type UIActions = {
 
 export type UIStore = UIState & UIActions;
 
-export const useUIStore = create<UIStore>((set, get) => ({
+export const useUIStore = create<UIStore>()(persist((set, get) => ({
   // State
   selectedIds: new Set<string>(),
   activeIndex: null,
   sortState: null,
+  sortViewKey: "library",
+  sortStates: {},
   searchQuery: "",
+  advancedTrackFilters: { ...DEFAULT_ADVANCED_TRACK_FILTERS },
   analysisTrackIds: [],
+  isAnalysisModalMinimized: false,
   editTrackIds: [],
   pendingPlaylistDrop: null,
   isPlaylistModalOpen: false,
@@ -137,25 +159,56 @@ export const useUIStore = create<UIStore>((set, get) => ({
   clearSelection: () => set({ selectedIds: new Set(), activeIndex: null }),
 
   // Sorting Actions
-  setSortState: (sortState) => set({ sortState }),
+  activateSortView: (sortViewKey) => set((state) => ({
+    sortViewKey,
+    sortState: state.sortStates[sortViewKey] ?? null,
+  })),
+
+  setSortState: (sortState) => set((state) => {
+    const sortStates = { ...state.sortStates };
+    if (sortState) sortStates[state.sortViewKey] = sortState;
+    else delete sortStates[state.sortViewKey];
+    return { sortState, sortStates };
+  }),
 
   toggleSort: (key) =>
     set((state) => {
+      let sortState: SortState;
       if (!state.sortState || state.sortState.key !== key) {
-        return { sortState: { key, direction: "asc" } };
+        sortState = { key, direction: "asc" };
+      } else if (state.sortState.direction === "asc") {
+        sortState = { key, direction: "desc" };
+      } else {
+        sortState = null;
       }
-      if (state.sortState.direction === "asc") {
-        return { sortState: { key, direction: "desc" } };
-      }
-      return { sortState: null };
+      const sortStates = { ...state.sortStates };
+      if (sortState) sortStates[state.sortViewKey] = sortState;
+      else delete sortStates[state.sortViewKey];
+      return { sortState, sortStates };
     }),
 
   // Search
   setSearchQuery: (searchQuery) => set({ searchQuery }),
+  setAdvancedTrackFilters: (filters) => set((state) => ({
+    advancedTrackFilters: typeof filters === "function"
+      ? filters(state.advancedTrackFilters)
+      : filters,
+  })),
+  resetAdvancedTrackFilters: () => set({
+    advancedTrackFilters: { ...DEFAULT_ADVANCED_TRACK_FILTERS, missingMetadata: [] },
+  }),
 
   // Analysis Modal
-  openAnalysisModal: (trackIds) => set({ analysisTrackIds: trackIds }),
-  closeAnalysisModal: () => set({ analysisTrackIds: [] }),
+  openAnalysisModal: (trackIds) => set({
+    analysisTrackIds: trackIds,
+    isAnalysisModalMinimized: false,
+  }),
+  closeAnalysisModal: () => set({
+    analysisTrackIds: [],
+    isAnalysisModalMinimized: false,
+  }),
+  minimizeAnalysisModal: () => set({ isAnalysisModalMinimized: true }),
+  restoreAnalysisModal: () => set({ isAnalysisModalMinimized: false }),
 
   // Edit Modal
   openEditModal: (trackIds) => set({ editTrackIds: trackIds }),
@@ -181,6 +234,9 @@ export const useUIStore = create<UIStore>((set, get) => ({
 
   // Import Progress
   setImportProgress: (importProgress) => set({ importProgress }),
+}), {
+  name: "muro-ui-preferences",
+  partialize: (state) => ({ sortStates: state.sortStates }),
 }));
 
 // Selectors

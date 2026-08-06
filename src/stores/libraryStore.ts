@@ -1,10 +1,11 @@
 import { create } from "zustand";
-import type { Playlist, Track } from "../types";
+import type { Playlist, PlaylistFolder, Track } from "../types";
 
 type LibraryState = {
   tracks: Track[];
   inboxTracks: Track[];
   playlists: Playlist[];
+  playlistFolders: PlaylistFolder[];
   allTracks: Track[];
 };
 
@@ -20,11 +21,17 @@ type LibraryActions = {
 
   // Playlists
   setPlaylists: (playlists: Playlist[] | ((prev: Playlist[]) => Playlist[])) => void;
+  setPlaylistFolders: (
+    folders: PlaylistFolder[] | ((prev: PlaylistFolder[]) => PlaylistFolder[])
+  ) => void;
   addPlaylist: (playlist: Playlist) => void;
   updatePlaylist: (id: string, updates: Partial<Playlist>) => void;
   deletePlaylist: (id: string) => void;
   addTracksToPlaylist: (playlistId: string, trackIds: string[]) => void;
   removeTracksFromPlaylist: (playlistId: string, count: number) => void;
+  addPlaylistFolder: (folder: PlaylistFolder) => void;
+  updatePlaylistFolder: (id: string, updates: Partial<PlaylistFolder>) => void;
+  deletePlaylistFolder: (id: string) => void;
 };
 
 export type LibraryStore = LibraryState & LibraryActions;
@@ -34,6 +41,7 @@ export const useLibraryStore = create<LibraryStore>((set) => ({
   tracks: [],
   inboxTracks: [],
   playlists: [],
+  playlistFolders: [],
   allTracks: [],
 
   // Track Actions
@@ -104,6 +112,12 @@ export const useLibraryStore = create<LibraryStore>((set) => ({
         typeof playlists === "function" ? playlists(state.playlists) : playlists,
     })),
 
+  setPlaylistFolders: (folders) =>
+    set((state) => ({
+      playlistFolders:
+        typeof folders === "function" ? folders(state.playlistFolders) : folders,
+    })),
+
   addPlaylist: (playlist) =>
     set((state) => ({ playlists: [...state.playlists, playlist] })),
 
@@ -136,6 +150,29 @@ export const useLibraryStore = create<LibraryStore>((set) => ({
           : p
       ),
     })),
+
+  addPlaylistFolder: (folder) =>
+    set((state) => ({ playlistFolders: [...state.playlistFolders, folder] })),
+
+  updatePlaylistFolder: (id, updates) =>
+    set((state) => ({
+      playlistFolders: state.playlistFolders.map((folder) =>
+        folder.id === id ? { ...folder, ...updates } : folder
+      ),
+    })),
+
+  deletePlaylistFolder: (id) =>
+    set((state) => {
+      const parentId = state.playlistFolders.find((folder) => folder.id === id)?.parentId;
+      return {
+        playlistFolders: state.playlistFolders
+          .filter((folder) => folder.id !== id)
+          .map((folder) => folder.parentId === id ? { ...folder, parentId } : folder),
+        playlists: state.playlists.map((playlist) =>
+          playlist.folderId === id ? { ...playlist, folderId: parentId } : playlist
+        ),
+      };
+    }),
 }));
 
 // Selectors

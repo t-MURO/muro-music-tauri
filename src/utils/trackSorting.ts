@@ -1,4 +1,5 @@
 import type { ColumnConfig, Track } from "../types";
+import { explicitAlbumArtistDisplay } from "./artistCredits";
 
 /**
  * Gets a sortable value from a track based on the column key.
@@ -17,23 +18,36 @@ export const getSortableValue = (
       return track.trackNumber ?? null;
     case "trackTotal":
       return track.trackTotal ?? null;
+    case "discNumber":
+      return track.discNumber ?? null;
     case "year":
       return track.year ?? null;
     case "bpm":
       return track.bpm ?? null;
     case "artists":
-      return track.artists ?? track.artist;
+      return explicitAlbumArtistDisplay(track) || null;
     case "key":
       return track.key ?? null;
+    case "format": {
+      const pathParts = track.sourcePath.split(/[\\/]/);
+      const filename = pathParts[pathParts.length - 1] ?? "";
+      const extensionParts = filename.split(".");
+      return filename.includes(".")
+        ? (extensionParts[extensionParts.length - 1]?.toUpperCase() ?? null)
+        : null;
+    }
     case "date":
     case "dateAdded":
-    case "dateModified": {
+    case "dateModified":
+    case "lastPlayedAt": {
       const raw =
         key === "date"
           ? track.date
           : key === "dateAdded"
             ? track.dateAdded
-            : track.dateModified;
+            : key === "dateModified"
+              ? track.dateModified
+              : track.lastPlayedAt;
       if (!raw) {
         return null;
       }
@@ -42,7 +56,7 @@ export const getSortableValue = (
     }
     default: {
       const value = track[key as keyof Track];
-      return value === undefined || value === null ? null : value;
+      return typeof value === "string" || typeof value === "number" ? value : null;
     }
   }
 };

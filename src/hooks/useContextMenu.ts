@@ -34,6 +34,19 @@ export const useContextMenu = ({
     [onSelectRow, selectedIds]
   );
 
+  const openForSelection = useCallback(
+    (event: React.MouseEvent, trackIds: string[]) => {
+      const selection = [...new Set(trackIds)].filter(Boolean);
+      if (selection.length === 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setMenuSelection(selection);
+      setMenuPosition({ x: event.clientX, y: event.clientY });
+      setOpenMenuId(selection[0]);
+    },
+    []
+  );
+
   const closeMenu = useCallback(() => {
     setOpenMenuId(null);
     setMenuSelection([]);
@@ -44,6 +57,7 @@ export const useContextMenu = ({
     menuPosition,
     menuSelection,
     openForRow,
+    openForSelection,
     openMenuId,
   };
 };

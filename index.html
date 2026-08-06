@@ -2,11 +2,14 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tauri + React + Typescript</title>
+    <link rel="icon" type="image/png" href="/src/assets/app-logo.png" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost https://asset.localhost data: blob: https://upload.wikimedia.org https://assets.fanart.tv https://*.theaudiodb.com https://cdn-images.dzcdn.net https://imgs.search.brave.com; media-src 'self' asset: http://asset.localhost https://asset.localhost blob:; connect-src 'self' asset: http://asset.localhost https://asset.localhost blob:"
+    />
+    <title>Muro Music</title>
   </head>
-
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>

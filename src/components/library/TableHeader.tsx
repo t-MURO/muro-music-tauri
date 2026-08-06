@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowDown, ArrowUp } from "lucide-react";
+import { ArrowDown, ArrowUp, Square, SquareCheckBig } from "lucide-react";
 import { t } from "../../i18n";
 import { useResizable } from "../../hooks";
 import type { ColumnConfig } from "../../types";
@@ -20,6 +20,8 @@ type TableHeaderProps = {
   onHeaderContextMenu?: (event: React.MouseEvent<HTMLDivElement>) => void;
   onSortChange?: (key: ColumnConfig["key"]) => void;
   sortState?: SortState;
+  allSelected: boolean;
+  onToggleSelectAll: () => void;
 };
 
 type DragState = {
@@ -40,6 +42,8 @@ export const TableHeader = ({
   onHeaderContextMenu,
   onSortChange,
   sortState,
+  allSelected,
+  onToggleSelectAll,
 }: TableHeaderProps) => {
   const { startResize } = useResizable();
   const [dragState, setDragState] = useState<DragState | null>(null);
@@ -155,14 +159,15 @@ export const TableHeader = ({
 
   return (
     <div
-      className="sticky top-0 z-30 bg-[var(--color-bg-secondary)]"
+      className="relative z-30 border-b border-[var(--color-border)] bg-[var(--color-bg-secondary)]"
+      data-track-table-header
       style={{ width: "100%", minWidth: tableWidth }}
       role="rowgroup"
       onContextMenu={onHeaderContextMenu}
     >
       <div className="relative" style={{ width: "100%", minWidth: tableWidth }}>
         <div
-          className="grid text-left text-[length:var(--font-size-xs)] font-semibold uppercase tracking-wider text-[color:var(--color-text-muted)]"
+          className="grid h-9 text-left text-[10px] font-semibold uppercase tracking-[0.08em] text-[color:var(--color-text-muted)]"
           style={{ gridTemplateColumns }}
           role="row"
         >
@@ -170,18 +175,29 @@ export const TableHeader = ({
             className="sticky left-0 z-40 flex items-center justify-center bg-[var(--color-bg-secondary)]"
             style={{ width: leadingColumnWidth }}
             role="columnheader"
-            aria-hidden="true"
-          />
+          >
+            <button
+              className="toolbar-icon-button h-7 w-7"
+              onClick={onToggleSelectAll}
+              type="button"
+              aria-label={allSelected ? "Clear track selection" : "Select all tracks"}
+            >
+              {allSelected
+                ? <SquareCheckBig className="h-3.5 w-3.5 text-[var(--color-accent)]" />
+                : <Square className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />}
+            </button>
+          </div>
           {columns.map((column) => {
             const isSorted = sortState?.key === column.key;
             const isDragging = dragState?.key === column.key && dragState.isDragging;
             return (
             <div
               key={column.key}
+              data-column-key={column.key}
               ref={(node) => {
                 columnRefs.current[column.key] = node;
               }}
-              className={`relative bg-[var(--color-bg-secondary)] px-4 py-3 pr-8 ${
+              className={`relative flex items-center border-l border-[var(--color-border-light)] bg-[var(--color-bg-secondary)] px-2 pr-4 ${
                 onColumnReorder ? (isDragging ? "cursor-grabbing" : "cursor-grab") : ""
               } ${isDragging ? "z-40" : ""} ${
                 isDragging ? "shadow-[var(--shadow-lg)]" : ""
@@ -203,7 +219,7 @@ export const TableHeader = ({
               }
             >
               <button
-                className="flex w-full items-center justify-between gap-2 truncate text-left"
+                className="flex h-full w-full items-center justify-between gap-2 truncate text-left hover:text-[var(--color-text-secondary)]"
                 onClick={() => {
                   if (suppressClickRef.current) {
                     return;
@@ -242,9 +258,8 @@ export const TableHeader = ({
                   </span>
                 )}
               </button>
-              <span className="absolute right-2 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded bg-[var(--color-border)] opacity-40" />
               <span
-                className="absolute right-0 top-0 h-full w-4 cursor-col-resize"
+                className="absolute right-0 top-0 h-full w-3 cursor-col-resize border-r border-transparent hover:border-[var(--color-accent)]"
                 data-resize-handle="true"
                 onDoubleClick={(event) => {
                   event.preventDefault();

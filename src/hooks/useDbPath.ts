@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { appDataDir, join } from "@tauri-apps/api/path";
+import { appDataDir, join } from "@muro/desktop/paths";
 import { useSettingsStore } from "../stores";
 
 export const useDbPath = () => {

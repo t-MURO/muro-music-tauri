@@ -41,6 +41,8 @@ const Toast = ({ notification, onDismiss }: ToastProps) => {
       <button
         onClick={() => onDismiss(notification.id)}
         className="shrink-0 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
+        aria-label="Dismiss notification"
+        title="Dismiss notification"
         type="button"
       >
         <X className="h-4 w-4" />

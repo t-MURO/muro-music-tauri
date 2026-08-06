@@ -3,10 +3,12 @@ import { useStickyState } from "./useStickyState";
 import { parseDetailWidth } from "../utils";
 import { useResizable } from "./useResizable";
 
+const COLLAPSED_QUEUE_PANEL_WIDTH = 40;
+
 export const useQueuePanel = () => {
-  const [queuePanelWidth, setQueuePanelWidth] = useStickyState(
+  const [storedQueuePanelWidth, setQueuePanelWidth] = useStickyState(
     "muro-queue-panel-width",
-    320,
+    328,
     {
       parse: parseDetailWidth,
       serialize: (value) => String(value),
@@ -20,27 +22,56 @@ export const useQueuePanel = () => {
       serialize: (value) => String(value),
     }
   );
-  const widthRef = useRef(queuePanelWidth);
+  const [queuePanelExpanded, setQueuePanelExpanded] = useStickyState(
+    "muro-queue-panel-expanded",
+    false,
+    {
+      parse: (raw) => raw === "true",
+      serialize: (value) => String(value),
+    }
+  );
+  const widthRef = useRef(storedQueuePanelWidth);
   const { startResize } = useResizable();
+  const queuePanelWidth = queuePanelCollapsed
+    ? COLLAPSED_QUEUE_PANEL_WIDTH
+    : storedQueuePanelWidth;
 
   useEffect(() => {
-    if (queuePanelCollapsed) {
+    if (queuePanelCollapsed || queuePanelExpanded) {
       return;
     }
 
-    widthRef.current = queuePanelWidth;
-  }, [queuePanelCollapsed, queuePanelWidth]);
+    widthRef.current = storedQueuePanelWidth;
+  }, [queuePanelCollapsed, queuePanelExpanded, storedQueuePanelWidth]);
 
   const toggleQueuePanelCollapsed = useCallback(() => {
     if (!queuePanelCollapsed) {
-      widthRef.current = queuePanelWidth;
-      setQueuePanelWidth(80);
+      widthRef.current = storedQueuePanelWidth;
       setQueuePanelCollapsed(true);
+      setQueuePanelExpanded(false);
     } else {
-      setQueuePanelWidth(widthRef.current || 320);
+      setQueuePanelWidth(widthRef.current || 328);
       setQueuePanelCollapsed(false);
     }
-  }, [queuePanelCollapsed, queuePanelWidth, setQueuePanelCollapsed, setQueuePanelWidth]);
+  }, [
+    queuePanelCollapsed,
+    setQueuePanelCollapsed,
+    setQueuePanelExpanded,
+    setQueuePanelWidth,
+    storedQueuePanelWidth,
+  ]);
+
+  const toggleQueuePanelExpanded = useCallback(() => {
+    if (queuePanelExpanded) {
+      setQueuePanelWidth(Math.max(260, Math.min(420, widthRef.current || 328)));
+      setQueuePanelExpanded(false);
+      return;
+    }
+    widthRef.current = Math.max(260, Math.min(420, queuePanelWidth));
+    const expandedWidth = Math.min(640, Math.max(480, Math.round(window.innerWidth * 0.4)));
+    setQueuePanelWidth(expandedWidth);
+    setQueuePanelExpanded(true);
+  }, [queuePanelExpanded, queuePanelWidth, setQueuePanelExpanded, setQueuePanelWidth]);
 
   const startQueuePanelResize = useCallback(
     (event: React.MouseEvent) => {
@@ -48,9 +79,9 @@ export const useQueuePanel = () => {
         event,
         queuePanelWidth,
         (nextWidth) => {
-          setQueuePanelWidth(Math.min(420, nextWidth));
+          setQueuePanelWidth(Math.min(720, nextWidth));
         },
-        { minSize: 200, maxSize: 420, direction: -1 }
+        { minSize: 240, maxSize: 720, direction: -1 }
       );
     },
     [queuePanelWidth, setQueuePanelWidth, startResize]
@@ -58,9 +89,11 @@ export const useQueuePanel = () => {
 
   return {
     queuePanelCollapsed,
+    queuePanelExpanded,
     queuePanelWidth,
     setQueuePanelWidth,
     startQueuePanelResize,
     toggleQueuePanelCollapsed,
+    toggleQueuePanelExpanded,
   };
 };
