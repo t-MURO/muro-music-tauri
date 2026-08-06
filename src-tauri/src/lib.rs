@@ -151,12 +151,27 @@ pub fn run() {
         .manage(parity::library_exports::PlaylistSyncService::new())
         .manage(parity::media_protocol::MediaProtocolService::default())
         .setup(move |app| {
+            match app.path().app_data_dir() {
+                Ok(app_data_dir) => {
+                    let report = parity::legacy_migration::migrate_legacy_database_if_needed(
+                        &app_data_dir,
+                    );
+                    match serde_json::to_string(&report) {
+                        Ok(report) => eprintln!("[muro][legacy-migration] {report}"),
+                        Err(error) => eprintln!(
+                            "[muro][legacy-migration] completed, but its report could not be serialized: {error}"
+                        ),
+                    }
+                }
+                Err(error) => eprintln!(
+                    "[muro][legacy-migration] skipped because app_data_dir could not be resolved: {error}"
+                ),
+            }
+
             let native_playback =
                 parity::native_playback::NativePlaybackService::new(app.handle().clone())?;
-            let playback_shutdown = native_playback.clone();
             app.manage(native_playback);
             let remote_output = parity::remote::RemoteOutputService::new(app.handle().clone());
-            let remote_shutdown = remote_output.clone();
             app.manage(remote_output);
             app.manage(parity::native_analysis::NativeAnalysisService::new(
                 app.handle().clone(),
@@ -185,11 +200,6 @@ pub fn run() {
             let window_for_events = window.clone();
 
             window.on_window_event(move |event| {
-                if matches!(event, WindowEvent::Destroyed) {
-                    playback_shutdown.shutdown();
-                    remote_shutdown.shutdown();
-                    return;
-                }
 
                 let WindowEvent::DragDrop(drag_event) = event else {
                     return;
@@ -349,6 +359,16 @@ pub fn run() {
             parity::artist_profiles::set_artist_image,
             parity::artist_profiles::scan_artist_profiles
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                app_handle
+                    .state::<parity::native_playback::NativePlaybackService>()
+                    .shutdown();
+                app_handle
+                    .state::<parity::remote::RemoteOutputService>()
+                    .shutdown();
+            }
+        });
 }
