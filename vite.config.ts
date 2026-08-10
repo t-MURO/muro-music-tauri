@@ -9,6 +9,10 @@ export default defineConfig({
   // must resolve relative to dist/index.html rather than the filesystem root.
   base: "./",
   plugins: [react()],
+  server: {
+    port: 1420,
+    strictPort: true,
+  },
   publicDir: fromHere("./public"),
   resolve: {
     dedupe: ["react", "react-dom"],
