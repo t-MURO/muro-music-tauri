@@ -3,6 +3,7 @@
 //! The database remains the source of truth: its transaction commits before
 //! file I/O, and every file failure is reported and persisted independently.
 
+use crate::parity::database::{find_bound_artist_id, find_unidentified_artist_id};
 use lofty::config::WriteOptions;
 use lofty::file::FileType;
 use lofty::id3::v2::Popularimeter;
@@ -389,17 +390,23 @@ fn find_or_create_artist(conn: &Connection, credit: &ArtistCredit) -> Result<Str
         .as_deref()
         .filter(|value| !value.trim().is_empty())
     {
-        if conn
+        let stored_musicbrainz_id = conn
             .query_row(
-                "SELECT 1 FROM artist_entities WHERE id=?1",
+                "SELECT musicbrainz_id FROM artist_entities WHERE id=?1",
                 [id],
-                |_| Ok(()),
+                |row| row.get::<_, Option<String>>(0),
             )
             .optional()
-            .map_err(db_error)?
-            .is_some()
-        {
-            return Ok(id.to_string());
+            .map_err(db_error)?;
+        if let Some(stored_musicbrainz_id) = stored_musicbrainz_id {
+            let conflicts = credit
+                .musicbrainz_id
+                .as_deref()
+                .zip(stored_musicbrainz_id.as_deref())
+                .is_some_and(|(requested, stored)| !requested.eq_ignore_ascii_case(stored));
+            if !conflicts {
+                return Ok(id.to_string());
+            }
         }
     }
     let by_musicbrainz = if let Some(mbid) = credit.musicbrainz_id.as_deref() {
@@ -417,15 +424,17 @@ fn find_or_create_artist(conn: &Connection, credit: &ArtistCredit) -> Result<Str
         return Ok(id);
     }
     let normalized = normalize_name(&credit.name);
-    if let Some(id) = conn
-        .query_row(
-            "SELECT id FROM artist_entities WHERE normalized_name=?1 ORDER BY created_at,id LIMIT 1",
-            [&normalized],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(db_error)?
-    {
+    let bound = if credit.musicbrainz_id.is_none() {
+        find_bound_artist_id(conn, &normalized)?
+    } else {
+        None
+    };
+    let by_name = if bound.is_none() {
+        find_unidentified_artist_id(conn, &normalized)?
+    } else {
+        None
+    };
+    if let Some(id) = bound.or(by_name) {
         if let Some(mbid) = credit.musicbrainz_id.as_deref() {
             conn.execute(
                 "UPDATE artist_entities SET musicbrainz_id=COALESCE(musicbrainz_id,?1),updated_at=?2 WHERE id=?3",

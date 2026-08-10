@@ -4,6 +4,7 @@
 //! connection per command, matching the rest of the parity backend. Audio
 //! property extraction is performed by Lofty; no Node runtime is involved.
 
+use crate::parity::database::{find_bound_artist_id, find_unidentified_artist_id};
 use lofty::prelude::AudioFile;
 use lofty::probe::Probe;
 use rusqlite::types::Value as SqlValue;
@@ -597,18 +598,17 @@ fn restore_credits(
             None
         };
         let normalized = normalize_name(name);
-        let by_name = if existing.is_none() {
-            conn.query_row(
-                "SELECT id FROM artist_entities WHERE normalized_name=?1 ORDER BY created_at,id LIMIT 1",
-                [&normalized],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(db_error)?
+        let bound = if existing.is_none() && musicbrainz_id.is_none() {
+            find_bound_artist_id(conn, &normalized)?
         } else {
             None
         };
-        let artist_id = if let Some(id) = existing.or(by_name) {
+        let by_name = if existing.is_none() && bound.is_none() {
+            find_unidentified_artist_id(conn, &normalized)?
+        } else {
+            None
+        };
+        let artist_id = if let Some(id) = existing.or(bound).or(by_name) {
             id
         } else {
             let id = Uuid::new_v4().to_string();

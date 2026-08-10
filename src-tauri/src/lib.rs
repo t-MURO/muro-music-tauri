@@ -272,6 +272,7 @@ pub fn run() {
             parity::commands::rebuild_search_index,
             parity::database::search_tracks,
             parity::database::migrate_artist_credits,
+            parity::database::merge_artists,
             parity::native_playback::playback_play_file,
             parity::native_playback::playback_preload_next,
             parity::native_playback::playback_clear_preload,

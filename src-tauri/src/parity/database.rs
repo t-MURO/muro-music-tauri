@@ -6,7 +6,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
@@ -192,6 +192,25 @@ pub struct ArtistMigrationResult {
     pub sets_created: usize,
     pub sets_replaced: usize,
     pub credits_created: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtistMergeResult {
+    pub source_artist_id: String,
+    pub artist_id: String,
+    pub name: String,
+    pub music_brainz_id: Option<String>,
+    pub credits_merged: usize,
+    pub tracks_affected: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ArtistEntityRow {
+    id: String,
+    canonical_name: String,
+    normalized_name: String,
+    musicbrainz_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -415,6 +434,13 @@ CREATE INDEX IF NOT EXISTS artist_entities_normalized_name_idx
 CREATE UNIQUE INDEX IF NOT EXISTS artist_entities_musicbrainz_id_uidx
   ON artist_entities(musicbrainz_id COLLATE NOCASE)
   WHERE musicbrainz_id IS NOT NULL AND trim(musicbrainz_id) <> '';
+CREATE TABLE IF NOT EXISTS artist_identity_bindings (
+  normalized_name TEXT PRIMARY KEY CHECK(length(trim(normalized_name)) > 0),
+  artist_id TEXT NOT NULL REFERENCES artist_entities(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS artist_identity_bindings_artist_idx
+  ON artist_identity_bindings(artist_id);
 CREATE TABLE IF NOT EXISTS track_artist_credit_sets (
   track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
   scope TEXT NOT NULL CHECK(scope IN ('track', 'album')),
@@ -567,6 +593,190 @@ fn normalize_artist_name(value: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase()
+}
+
+pub(crate) fn find_bound_artist_id(
+    conn: &Connection,
+    normalized_name: &str,
+) -> Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT entities.id
+         FROM artist_identity_bindings AS bindings
+         JOIN artist_entities AS entities ON entities.id=bindings.artist_id
+         WHERE bindings.normalized_name=?1
+         LIMIT 1",
+        [normalized_name],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(db_error)
+}
+
+pub(crate) fn find_unidentified_artist_id(
+    conn: &Connection,
+    normalized_name: &str,
+) -> Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT id FROM artist_entities
+         WHERE normalized_name=?1
+           AND (musicbrainz_id IS NULL OR trim(musicbrainz_id)='')
+         ORDER BY created_at,id LIMIT 1",
+        [normalized_name],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(db_error)
+}
+
+fn normalized_musicbrainz_id(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .map(|value| value.hyphenated().to_string().to_lowercase())
+}
+
+fn resolve_artist_entity(
+    conn: &Connection,
+    artist_id: Option<&str>,
+    musicbrainz_id: Option<&str>,
+    label: &str,
+) -> Result<ArtistEntityRow, String> {
+    let raw_artist_id = artist_id.unwrap_or_default().trim();
+    let prefixed_musicbrainz_id = raw_artist_id
+        .strip_prefix("mbid:")
+        .or_else(|| raw_artist_id.strip_prefix("MBID:"))
+        .and_then(|value| normalized_musicbrainz_id(Some(value)));
+    let resolved_musicbrainz_id =
+        normalized_musicbrainz_id(musicbrainz_id).or(prefixed_musicbrainz_id.clone());
+    let select = |sql: &str, value: &str| {
+        conn.query_row(sql, [value], |row| {
+            Ok(ArtistEntityRow {
+                id: row.get(0)?,
+                canonical_name: row.get(1)?,
+                normalized_name: row.get(2)?,
+                musicbrainz_id: row.get(3)?,
+            })
+        })
+        .optional()
+        .map_err(db_error)
+    };
+    let by_musicbrainz = if let Some(value) = resolved_musicbrainz_id.as_deref() {
+        select(
+            "SELECT id,canonical_name,normalized_name,musicbrainz_id
+             FROM artist_entities WHERE musicbrainz_id=?1 COLLATE NOCASE LIMIT 1",
+            value,
+        )?
+    } else {
+        None
+    };
+    if let Some(row) = by_musicbrainz {
+        return Ok(row);
+    }
+    if !raw_artist_id.is_empty() && prefixed_musicbrainz_id.is_none() {
+        if let Some(row) = select(
+            "SELECT id,canonical_name,normalized_name,musicbrainz_id
+             FROM artist_entities WHERE id=?1",
+            raw_artist_id,
+        )? {
+            return Ok(row);
+        }
+    }
+    Err(format!("{label} artist was not found"))
+}
+
+fn merge_artists_impl(
+    db_path: &str,
+    source_artist_id: Option<&str>,
+    source_music_brainz_id: Option<&str>,
+    target_artist_id: Option<&str>,
+    target_music_brainz_id: Option<&str>,
+) -> Result<ArtistMergeResult, String> {
+    let mut conn = open_database(db_path)?;
+    let transaction = conn.transaction().map_err(db_error)?;
+    let source = resolve_artist_entity(
+        &transaction,
+        source_artist_id,
+        source_music_brainz_id,
+        "Source",
+    )?;
+    let target = resolve_artist_entity(
+        &transaction,
+        target_artist_id,
+        target_music_brainz_id,
+        "Destination",
+    )?;
+    if source.id == target.id {
+        return Err("Choose a different artist to merge".to_string());
+    }
+    let source_musicbrainz = normalized_musicbrainz_id(source.musicbrainz_id.as_deref());
+    let target_musicbrainz = normalized_musicbrainz_id(target.musicbrainz_id.as_deref());
+    if source_musicbrainz
+        .as_deref()
+        .zip(target_musicbrainz.as_deref())
+        .is_some_and(|(source, target)| source != target)
+    {
+        return Err("Artists with different MusicBrainz IDs cannot be merged".to_string());
+    }
+    let (credits_merged, tracks_affected): (i64, i64) = transaction
+        .query_row(
+            "SELECT COUNT(*),COUNT(DISTINCT track_id)
+             FROM track_artist_credits WHERE artist_id=?1",
+            [&source.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(db_error)?;
+    transaction
+        .execute(
+            "UPDATE track_artist_credits SET artist_id=?1 WHERE artist_id=?2",
+            params![target.id, source.id],
+        )
+        .map_err(db_error)?;
+    transaction
+        .execute("DELETE FROM artist_entities WHERE id=?1", [&source.id])
+        .map_err(db_error)?;
+    let merged_musicbrainz_id = target_musicbrainz.or(source_musicbrainz);
+    let timestamp = now_seconds();
+    transaction
+        .execute(
+            "UPDATE artist_entities SET musicbrainz_id=?1,updated_at=?2 WHERE id=?3",
+            params![merged_musicbrainz_id, timestamp, target.id],
+        )
+        .map_err(db_error)?;
+    let mut names = HashSet::new();
+    names.insert(source.normalized_name);
+    names.insert(target.normalized_name);
+    for normalized_name in names {
+        if normalized_name.trim().is_empty() {
+            continue;
+        }
+        transaction
+            .execute(
+                "INSERT INTO artist_identity_bindings(
+                   normalized_name,artist_id,created_at,updated_at
+                 ) VALUES(?1,?2,?3,?3)
+                 ON CONFLICT(normalized_name) DO UPDATE SET
+                   artist_id=excluded.artist_id,updated_at=excluded.updated_at",
+                params![normalized_name, target.id, timestamp],
+            )
+            .map_err(db_error)?;
+    }
+    transaction
+        .execute(
+            "DELETE FROM artist_profiles WHERE artist_key=?1",
+            [&source.id],
+        )
+        .map_err(db_error)?;
+    let result = ArtistMergeResult {
+        source_artist_id: source.id,
+        artist_id: target.id,
+        name: target.canonical_name,
+        music_brainz_id: merged_musicbrainz_id,
+        credits_merged: credits_merged.max(0) as usize,
+        tracks_affected: tracks_affected.max(0) as usize,
+    };
+    transaction.commit().map_err(db_error)?;
+    Ok(result)
 }
 
 fn canonical_artist_name(value: &str) -> String {
@@ -746,15 +956,17 @@ fn find_or_create_artist(conn: &Connection, credit: &ParsedArtistCredit) -> Resu
     if let Some(id) = by_mb_id {
         return Ok(id);
     }
-    if let Some(id) = conn
-        .query_row(
-            "SELECT id FROM artist_entities WHERE normalized_name=?1 ORDER BY created_at,id LIMIT 1",
-            [&normalized],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(db_error)?
-    {
+    let bound = if credit.musicbrainz_id.is_none() {
+        find_bound_artist_id(conn, &normalized)?
+    } else {
+        None
+    };
+    let by_name = if bound.is_none() {
+        find_unidentified_artist_id(conn, &normalized)?
+    } else {
+        None
+    };
+    if let Some(id) = bound.or(by_name) {
         if let Some(mb_id) = credit.musicbrainz_id.as_deref() {
             conn.execute(
                 "UPDATE artist_entities SET musicbrainz_id=COALESCE(musicbrainz_id,?1),updated_at=?2 WHERE id=?3",
@@ -1643,6 +1855,27 @@ pub fn migrate_artist_credits(
     migrate_artist_credits_impl(&conn, exceptions.as_deref().unwrap_or_default())
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub async fn merge_artists(
+    db_path: String,
+    source_artist_id: Option<String>,
+    source_music_brainz_id: Option<String>,
+    target_artist_id: Option<String>,
+    target_music_brainz_id: Option<String>,
+) -> Result<ArtistMergeResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        merge_artists_impl(
+            &db_path,
+            source_artist_id.as_deref(),
+            source_music_brainz_id.as_deref(),
+            target_artist_id.as_deref(),
+            target_music_brainz_id.as_deref(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1662,6 +1895,7 @@ mod tests {
             "playlist_folders",
             "play_history",
             "artist_entities",
+            "artist_identity_bindings",
             "tracks_fts",
         ] {
             let found: i64 = conn
@@ -1676,6 +1910,93 @@ mod tests {
         assert!(columns(&conn, "tracks")
             .unwrap()
             .contains("loudness_source"));
+    }
+
+    #[test]
+    fn artist_merge_reassigns_credits_and_binds_future_name_only_credits() {
+        let path = std::env::temp_dir().join(format!("muro-artist-merge-{}.db", Uuid::new_v4()));
+        let conn = Connection::open(&path).unwrap();
+        ensure_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO tracks(id,title,artist,album,source_path,import_status,added_at,updated_at)
+             VALUES('target-track','Target','Duplicate Artist','Album','target.flac','accepted',1,1),
+                   ('source-track','Source','Duplicate Artist','Album','source.flac','accepted',1,1)",
+            [],
+        )
+        .unwrap();
+        let target_mbid = "33333333-3333-4333-8333-333333333333";
+        conn.execute(
+            "INSERT INTO artist_entities(id,canonical_name,normalized_name,musicbrainz_id,created_at,updated_at)
+             VALUES('target','Duplicate Artist','duplicate artist',?1,1,1),
+                   ('source','Duplicate Artist','duplicate artist',NULL,2,2)",
+            [target_mbid],
+        )
+        .unwrap();
+        for (track_id, artist_id) in [("target-track", "target"), ("source-track", "source")] {
+            conn.execute(
+                "INSERT INTO track_artist_credit_sets(track_id,scope,display_text,provenance,confidence,needs_review,created_at,updated_at)
+                 VALUES(?1,'track','Duplicate Artist','file-tags',100,0,1,1)",
+                [track_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO track_artist_credits(track_id,scope,position,artist_id,credited_name,join_phrase)
+                 VALUES(?1,'track',0,?2,'Duplicate Artist','')",
+                params![track_id, artist_id],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let result = merge_artists_impl(
+            path.to_string_lossy().as_ref(),
+            Some("source"),
+            None,
+            None,
+            Some(target_mbid),
+        )
+        .unwrap();
+        assert_eq!(result.artist_id, "target");
+        assert_eq!(result.credits_merged, 1);
+        assert_eq!(result.tracks_affected, 1);
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            find_bound_artist_id(&conn, "duplicate artist").unwrap(),
+            Some("target".to_string())
+        );
+        let assigned: String = conn
+            .query_row(
+                "SELECT artist_id FROM track_artist_credits WHERE track_id='source-track'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(assigned, "target");
+        let display: String = conn
+            .query_row(
+                "SELECT artist FROM tracks WHERE id='source-track'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(display, "Duplicate Artist");
+        conn.execute(
+            "INSERT INTO artist_entities(id,canonical_name,normalized_name,musicbrainz_id,created_at,updated_at)
+             VALUES('conflict','Other Identity','other identity','44444444-4444-4444-8444-444444444444',3,3)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let error = merge_artists_impl(
+            path.to_string_lossy().as_ref(),
+            Some("conflict"),
+            None,
+            Some("target"),
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("different MusicBrainz IDs"));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

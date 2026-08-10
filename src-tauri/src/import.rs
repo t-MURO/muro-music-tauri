@@ -1,4 +1,5 @@
 use crate::cover_art;
+use crate::parity::database::{find_bound_artist_id, find_unidentified_artist_id};
 use crate::search;
 use chrono::{DateTime, Utc};
 use lofty::file::FileType;
@@ -531,10 +532,25 @@ pub fn clear_tracks(db_path: &str, cache_dir: &Path) -> Result<(), String> {
         return Ok(());
     }
 
-    let conn = Connection::open(db_path).map_err(|error| error.to_string())?;
+    let mut conn = Connection::open(db_path).map_err(|error| error.to_string())?;
     ensure_schema(&conn)?;
-    conn.execute("DELETE FROM tracks", [])
+    let transaction = conn.transaction().map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM tracks", [])
         .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM artist_identity_bindings", [])
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM artist_entities", [])
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM artist_profiles", [])
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM album_cover_cache", [])
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -1162,18 +1178,17 @@ fn find_or_create_artist(
         }
     }
     let normalized = normalized_artist_key(&credit.name);
-    if let Some(id) = conn
-        .query_row(
-            "SELECT id FROM artist_entities
-             WHERE normalized_name=?1
-               AND (?2 IS NULL OR musicbrainz_id IS NULL OR musicbrainz_id=?2 COLLATE NOCASE)
-             ORDER BY created_at,id LIMIT 1",
-            params![normalized, credit.musicbrainz_id.as_deref()],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|error| error.to_string())?
-    {
+    let bound = if credit.musicbrainz_id.is_none() {
+        find_bound_artist_id(conn, &normalized)?
+    } else {
+        None
+    };
+    let by_name = if bound.is_none() {
+        find_unidentified_artist_id(conn, &normalized)?
+    } else {
+        None
+    };
+    if let Some(id) = bound.or(by_name) {
         if let Some(mbid) = credit.musicbrainz_id.as_deref() {
             conn.execute(
                 "UPDATE artist_entities SET musicbrainz_id=COALESCE(musicbrainz_id,?1),updated_at=?2 WHERE id=?3",
@@ -1460,6 +1475,14 @@ pub fn ensure_schema(conn: &Connection) -> Result<(), String> {
          CREATE UNIQUE INDEX IF NOT EXISTS artist_entities_musicbrainz_id_uidx
            ON artist_entities(musicbrainz_id COLLATE NOCASE)
            WHERE musicbrainz_id IS NOT NULL AND trim(musicbrainz_id) <> '';
+         CREATE TABLE IF NOT EXISTS artist_identity_bindings (
+           normalized_name TEXT PRIMARY KEY CHECK(length(trim(normalized_name)) > 0),
+           artist_id TEXT NOT NULL REFERENCES artist_entities(id) ON DELETE CASCADE,
+           created_at INTEGER NOT NULL,
+           updated_at INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS artist_identity_bindings_artist_idx
+           ON artist_identity_bindings(artist_id);
          CREATE TABLE IF NOT EXISTS track_artist_credit_sets (
            track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
            scope TEXT NOT NULL CHECK(scope IN ('track', 'album')),
