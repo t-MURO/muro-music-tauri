@@ -289,17 +289,17 @@ export const useFileImport = ({
   );
 
   const handleCreatePlaylist = useCallback(
-    async (name: string) => {
+    async (name: string, initialTrackIds: string[] = []): Promise<string | null> => {
       const trimmed = name.trim();
       if (!trimmed) {
-        return;
+        return null;
       }
 
       playlistSequenceRef.current += 1;
       const playlist: Playlist = {
         id: `playlist-${Date.now()}-${playlistSequenceRef.current}`,
         name: trimmed,
-        trackIds: [],
+        trackIds: [...new Set(initialTrackIds)],
         sortOrder: playlists
           .filter((item) => !item.folderId)
           .reduce((highest, item) => Math.max(highest, item.sortOrder), -1) + 1,
@@ -316,6 +316,14 @@ export const useFileImport = ({
             playlist.folderId,
             playlist.sortOrder,
           );
+          try {
+            if (playlist.trackIds.length > 0) {
+              await setPlaylistTracks(resolvedDbPath, playlist.id, playlist.trackIds);
+            }
+          } catch (error) {
+            await deletePlaylist(resolvedDbPath, playlist.id).catch(() => undefined);
+            throw error;
+          }
           setPlaylists((current) => [...current, playlist]);
           return t("history.playlist.created", { name: playlist.name });
         },
@@ -330,8 +338,10 @@ export const useFileImport = ({
 
       try {
         await commandManager.execute(command);
+        return playlist.id;
       } catch (error) {
         notify.error(t("toast.playlist.createFailed"));
+        return null;
       }
     },
     [playlists, resolveDbPath, setPlaylists]

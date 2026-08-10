@@ -692,6 +692,32 @@ export const migrateArtistCredits = (
   artistSeparatorExceptions,
 });
 
+export type ArtistMergeIdentity = {
+  artistId: string;
+  musicBrainzId?: string;
+};
+
+export type ArtistMergeResult = {
+  sourceArtistId: string;
+  artistId: string;
+  name: string;
+  musicBrainzId: string | null;
+  creditsMerged: number;
+  tracksAffected: number;
+};
+
+export const mergeArtists = (
+  dbPath: string,
+  source: ArtistMergeIdentity,
+  target: ArtistMergeIdentity,
+) => invoke<ArtistMergeResult>("merge_artists", {
+  dbPath,
+  sourceArtistId: source.artistId,
+  sourceMusicBrainzId: source.musicBrainzId,
+  targetArtistId: target.artistId,
+  targetMusicBrainzId: target.musicBrainzId,
+});
+
 // ============================================================================
 // Recently Played Operations
 // ============================================================================

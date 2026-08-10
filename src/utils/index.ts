@@ -1,5 +1,10 @@
 export { parseColumns, parseNumber, parseDetailWidth } from "./storage";
 export { getSortableValue, compareSortValues } from "./trackSorting";
+export {
+  buildPlaylistMembershipMap,
+  formatPlaylistMembership,
+  type TrackPlaylistMembership,
+} from "./playlistMembership";
 export { resolveDbPath } from "./dbPath";
 export {
   albumArtistCredits,
@@ -118,11 +123,14 @@ export {
   backfillSearchText,
   backfillCoverArt,
   migrateArtistCredits,
+  mergeArtists,
   loadRecentlyPlayed,
   recordTrackPlay,
   updatePlayHistory,
   type DeleteTracksResult,
   type ArtistProfileScanResult,
+  type ArtistMergeIdentity,
+  type ArtistMergeResult,
   type TechnicalMetadataScanResult,
   type MetadataSearchCandidate,
   type AcoustIdCandidate,

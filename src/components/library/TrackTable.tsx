@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { useVirtualizer, type VirtualItem } from "@tanstack/react-virtual";
 import type { ColumnConfig, Track } from "../../types";
 import type { ArtistTarget } from "../../utils/artistCredits";
+import type { TrackPlaylistMembership } from "../../utils/playlistMembership";
 import { TableHeader } from "./TableHeader";
 import { TableEmptyState } from "./TableEmptyState";
 import { TableRow } from "./TableRow";
@@ -12,6 +13,7 @@ import { matchesShortcut } from "../../keyboard/shortcuts";
 type TrackTableProps = {
   tracks: Track[];
   columns: ColumnConfig[];
+  playlistMembershipByTrackId: ReadonlyMap<string, readonly TrackPlaylistMembership[]>;
   emptyTitle: string;
   emptyDescription: string;
   emptyActionLabel?: string;
@@ -36,6 +38,7 @@ type TrackTableProps = {
   onTogglePlay?: () => void;
   onOpenArtist?: (artist: ArtistTarget) => void;
   onOpenAlbum?: (trackId: string) => void;
+  onOpenPlaylist?: (playlistId: string) => void;
   onAlbumContextMenu?: (event: React.MouseEvent, trackId: string) => void;
   onColumnResize: (key: ColumnConfig["key"], width: number) => void;
   onColumnAutoFit: (key: ColumnConfig["key"]) => void;
@@ -51,6 +54,7 @@ export const TrackTable = memo(
   ({
     tracks,
     columns,
+    playlistMembershipByTrackId,
     emptyTitle,
     emptyDescription,
     emptyActionLabel,
@@ -66,6 +70,7 @@ export const TrackTable = memo(
     onTogglePlay,
     onOpenArtist,
     onOpenAlbum,
+    onOpenPlaylist,
     onAlbumContextMenu,
     onColumnResize,
     onColumnAutoFit,
@@ -353,6 +358,7 @@ export const TrackTable = memo(
                 <TableRow
                   key={virtualRow.key}
                   track={track}
+                  playlistMembership={playlistMembershipByTrackId.get(track.id) ?? []}
                   index={virtualRow.index}
                   isSelected={selectedIds.has(track.id)}
                   isPlayingTrack={track.id === playingTrackId}
@@ -369,6 +375,7 @@ export const TrackTable = memo(
                   onRowDoubleClick={handleRowDoubleClickStable}
                   onOpenArtist={onOpenArtist}
                   onOpenAlbum={onOpenAlbum}
+                  onOpenPlaylist={onOpenPlaylist}
                   onAlbumContextMenu={onAlbumContextMenu}
                   onRatingChange={handleRatingChangeStable}
                 />

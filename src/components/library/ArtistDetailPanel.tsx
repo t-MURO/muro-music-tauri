@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { CalendarDays, Disc3, ExternalLink, ImageIcon, MapPin, Music2, RefreshCw, UserRound } from "lucide-react";
+import { CalendarDays, Combine, Disc3, ExternalLink, ImageIcon, MapPin, Music2, RefreshCw, UserRound } from "lucide-react";
 import { convertFileSrc } from "@muro/desktop/runtime";
 import type { ArtistProfile } from "../../types";
+import { t } from "../../i18n";
 
 const profileImageSource = (profile?: ArtistProfile | null) => {
   if (profile?.imagePath) return convertFileSrc(profile.imagePath);
@@ -24,6 +25,7 @@ type ArtistDetailPanelProps = {
   albumCount: number;
   onRefresh: () => void;
   onChangePicture: () => void;
+  onMerge?: () => void;
   onOpenSource: (url: string) => void;
 };
 
@@ -36,6 +38,7 @@ export const ArtistDetailPanel = ({
   albumCount,
   onRefresh,
   onChangePicture,
+  onMerge,
   onOpenSource,
 }: ArtistDetailPanelProps) => {
   const imageSource = profileImageSource(profile);
@@ -60,6 +63,12 @@ export const ArtistDetailPanel = ({
             )}
           </div>
           <div className="artist-detail-heading-actions">
+            {onMerge && (
+              <button className="artist-detail-refresh" data-artist-merge-button onClick={onMerge} title={t("artist.merge.buttonTitle")} type="button">
+                <Combine />
+                {t("artist.merge.button")}
+              </button>
+            )}
             <button className="artist-detail-refresh" onClick={onChangePicture} title="Search for another artist picture" type="button">
               <ImageIcon />
               Picture

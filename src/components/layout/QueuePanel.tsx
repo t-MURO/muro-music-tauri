@@ -16,6 +16,7 @@ import { t } from "../../i18n";
 import { useDragSession } from "../../contexts/DragSessionContext";
 import { NowPlayingTrack } from "../queue/NowPlayingTrack";
 import { MixSuggestions } from "../queue/MixSuggestions";
+import { SetPlanner } from "../queue/SetPlanner";
 import type { Playlist, Track } from "../../types";
 import type { CurrentTrack } from "../../hooks";
 
@@ -27,6 +28,8 @@ type QueuePanelProps = {
   queueTracks: Track[];
   playingNextTracks: Track[];
   allTracks: Track[];
+  libraryTracks: Track[];
+  playlists: Playlist[];
   currentTrack: CurrentTrack | null;
   currentTrackDetails?: Track | null;
   currentPlaylist?: Playlist | null;
@@ -35,6 +38,9 @@ type QueuePanelProps = {
   onReorderPlayingNext: (fromIndex: number, toIndex: number) => void;
   onMovePlayingNextToQueue: (fromIndex: number, toIndex: number) => void;
   onClearQueue: () => void;
+  onReplaceQueue: (trackIds: string[]) => void;
+  onAddToQueue: (trackIds: string[]) => void;
+  onCreatePlaylist: (name: string, trackIds: string[]) => Promise<string | null>;
   onPlayTrack: (trackId: string) => void;
   onPlayNext: (trackId: string) => void;
   onMixWithCurrent?: (trackId: string) => void;
@@ -67,6 +73,8 @@ export const QueuePanel = ({
   queueTracks,
   playingNextTracks,
   allTracks,
+  libraryTracks,
+  playlists,
   currentTrack,
   currentTrackDetails,
   currentPlaylist,
@@ -75,6 +83,9 @@ export const QueuePanel = ({
   onReorderPlayingNext,
   onMovePlayingNextToQueue,
   onClearQueue,
+  onReplaceQueue,
+  onAddToQueue,
+  onCreatePlaylist,
   onPlayTrack,
   onPlayNext,
   onMixWithCurrent,
@@ -85,7 +96,7 @@ export const QueuePanel = ({
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   const [dragList, setDragList] = useState<PlaybackListKind | null>(null);
   const [dropList, setDropList] = useState<PlaybackListKind | null>(null);
-  const [panelView, setPanelView] = useState<"queue" | "mix">("queue");
+  const [panelView, setPanelView] = useState<"queue" | "mix" | "set">("queue");
   const dragStartRef = useRef<{
     list: PlaybackListKind;
     index: number;
@@ -303,13 +314,24 @@ export const QueuePanel = ({
             <Sparkles className="h-3.5 w-3.5 shrink-0" />
             <span className="truncate">Mix Next</span>
           </button>
+          <button
+            className={`flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-[calc(var(--radius-md)-2px)] px-2 py-1.5 text-[10px] font-medium transition-colors ${panelView === "set" ? "bg-[var(--color-accent-light)] text-[var(--color-accent)] shadow-sm" : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"}`}
+            onClick={() => setPanelView("set")}
+            role="tab"
+            aria-selected={panelView === "set"}
+            data-panel-view="set"
+            type="button"
+          >
+            <AudioLines className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate">Set</span>
+          </button>
         </div>
-        {panelView === "mix" && (
+        {panelView !== "queue" && (
           <button
             className="toolbar-icon-button ml-auto"
             onClick={onToggleExpanded}
-            title={expanded ? "Restore Mix Next panel" : "Expand Mix Next panel"}
-            aria-label={expanded ? "Restore Mix Next panel" : "Expand Mix Next panel"}
+            title={expanded ? "Restore planning panel" : "Expand planning panel"}
+            aria-label={expanded ? "Restore planning panel" : "Expand planning panel"}
             aria-pressed={expanded}
             data-mix-expand
             type="button"
@@ -317,7 +339,7 @@ export const QueuePanel = ({
             {expanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
           </button>
         )}
-        <button className={`toolbar-icon-button ${panelView === "mix" ? "" : "ml-auto"}`} onClick={onToggleCollapsed} title="Collapse queue" aria-label="Collapse queue" type="button"><PanelRightClose className="h-4 w-4" /></button>
+        <button className={`toolbar-icon-button ${panelView !== "queue" ? "" : "ml-auto"}`} onClick={onToggleCollapsed} title="Collapse queue" aria-label="Collapse queue" type="button"><PanelRightClose className="h-4 w-4" /></button>
       </div>
 
       {panelView === "queue" ? (
@@ -460,7 +482,7 @@ export const QueuePanel = ({
         </div>
       )}
         </>
-      ) : (
+      ) : panelView === "mix" ? (
         <MixSuggestions
           tracks={allTracks}
           currentTrack={currentTrackDetails}
@@ -469,6 +491,15 @@ export const QueuePanel = ({
           onPlayTrack={onPlayTrack}
           onPlayNext={onPlayNext}
           onMixWithCurrent={onMixWithCurrent}
+        />
+      ) : (
+        <SetPlanner
+          playlists={playlists}
+          tracks={libraryTracks}
+          currentPlaylistId={currentPlaylist?.id}
+          onReplaceQueue={onReplaceQueue}
+          onAddToQueue={onAddToQueue}
+          onCreatePlaylist={onCreatePlaylist}
         />
       )}
     </aside>

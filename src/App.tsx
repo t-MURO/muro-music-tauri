@@ -23,6 +23,7 @@ import {
   ArtistDetailPanel,
   ArtistIndexView,
   buildArtistIndexItems,
+  type ArtistIndexItem,
   CollectionIndexView,
   buildCollectionIndexItems,
   TrackTable,
@@ -35,6 +36,7 @@ import {
   AlbumMetadataSearchModal,
   AcoustIdModal,
   ArtistImageModal,
+  ArtistMergeModal,
   ArtistSeparatorReviewModal,
   PlaylistCreateModal,
   PlaylistEditModal,
@@ -73,6 +75,7 @@ import {
   useGaplessPlayback,
   useIndexedSearch,
   useArtistProfiles,
+  useDbPath,
   normalizeArtistProfileKey,
   type LibraryView,
 } from "./hooks";
@@ -93,6 +96,7 @@ import {
   getPathForView,
   compareSortValues,
   getSortableValue,
+  buildPlaylistMembershipMap,
   filterTracksBySearch,
   filterTracksAdvanced,
   countAdvancedTrackFilters,
@@ -104,6 +108,10 @@ import {
   albumArtistDisplay,
   formatArtistCredits,
   reviewedCommaSeparatedArtistCredits,
+  importedTrackToTrack,
+  loadRecentlyPlayed,
+  loadTracks,
+  mergeArtists,
   type ArtistTarget,
 } from "./utils";
 import { confirm, open, save } from "@muro/desktop/dialogs";
@@ -168,6 +176,8 @@ function App() {
   // Get state from stores
   const tracks = useLibraryStore((s) => s.tracks);
   const inboxTracks = useLibraryStore((s) => s.inboxTracks);
+  const setTracks = useLibraryStore((s) => s.setTracks);
+  const setInboxTracks = useLibraryStore((s) => s.setInboxTracks);
   const playlists = useLibraryStore((s) => s.playlists);
   const playlistFolders = useLibraryStore((s) => s.playlistFolders);
   const allTracks = useLibraryStore(selectAllTracks);
@@ -177,12 +187,17 @@ function App() {
     () => new Map(allTracks.map((track) => [track.id, track])),
     [allTracks],
   );
+  const playlistMembershipByTrackId = useMemo(
+    () => buildPlaylistMembershipMap(playlists),
+    [playlists],
+  );
   const artistSeparatorCandidates = useMemo(
     () => findArtistSeparatorCandidates(allTracks, artistSeparatorExceptions),
     [allTracks, artistSeparatorExceptions],
   );
 
   const recentlyPlayedTracks = useRecentlyPlayedStore((s) => s.recentlyPlayedTracks);
+  const setRecentlyPlayedTracks = useRecentlyPlayedStore((s) => s.setRecentlyPlayedTracks);
   const smartCrates = useSmartCrateStore((s) => s.smartCrates);
   const createSmartCrate = useSmartCrateStore((s) => s.createSmartCrate);
   const updateSmartCrate = useSmartCrateStore((s) => s.updateSmartCrate);
@@ -201,6 +216,7 @@ function App() {
   const [albumMetadataTrackIds, setAlbumMetadataTrackIds] = useState<string[]>([]);
   const [acoustIdTrackIds, setAcoustIdTrackIds] = useState<string[]>([]);
   const [artistImageTarget, setArtistImageTarget] = useState<ArtistTarget | null>(null);
+  const [artistMergeSource, setArtistMergeSource] = useState<ArtistIndexItem | null>(null);
   const [artistSeparatorReview, setArtistSeparatorReview] =
     useState<ArtistSeparatorReviewSession | null>(null);
   const [artistSeparatorApplying, setArtistSeparatorApplying] = useState(false);
@@ -222,6 +238,7 @@ function App() {
   const djMixEnabled = isDjMixFeatureAvailable(djMixFeatureEnabled);
   const dbPath = useSettingsStore((s) => s.dbPath);
   const dbFileName = useSettingsStore((s) => s.dbFileName);
+  const libraryRoot = useSettingsStore((s) => s.watchedFolder || undefined);
   const setTheme = useSettingsStore((s) => s.setTheme);
   const setLocale = useSettingsStore((s) => s.setLocale);
   const setSeekMode = useSettingsStore((s) => s.setSeekMode);
@@ -231,6 +248,7 @@ function App() {
   const recentlyAddedPeriodDays = useSettingsStore((s) => s.recentlyAddedPeriodDays);
   const setRecentlyAddedPeriodDays = useSettingsStore((s) => s.setRecentlyAddedPeriodDays);
   const keyboardShortcuts = useSettingsStore((s) => s.keyboardShortcuts);
+  const resolveDbPath = useDbPath();
 
   useEffect(() => {
     applyThemeMode(theme);
@@ -301,6 +319,12 @@ function App() {
       navigate(getPathForView(newView));
     },
     [navigate]
+  );
+  const handleOpenPlaylist = useCallback(
+    (playlistId: string) => {
+      navigateToView(`playlist:${playlistId}` as LibraryView);
+    },
+    [navigateToView],
   );
 
   useEffect(() => {
@@ -478,6 +502,49 @@ function App() {
     notify.success(t("toast.artist.imageUpdated"));
   }, [artistImageTarget, selectArtistProfileImage]);
 
+  const handleMergeArtists = useCallback(async (
+    source: ArtistIndexItem,
+    target: ArtistIndexItem,
+  ) => {
+    const resolvedPath = await resolveDbPath();
+    const result = await mergeArtists(resolvedPath, {
+      artistId: source.artistId,
+      musicBrainzId: source.musicBrainzId,
+    }, {
+      artistId: target.artistId,
+      musicBrainzId: target.musicBrainzId,
+    });
+    const [snapshot, recentlyPlayedSnapshot] = await Promise.all([
+      loadTracks(resolvedPath, libraryRoot, artistSeparatorExceptions),
+      loadRecentlyPlayed(resolvedPath, 50, libraryRoot, artistSeparatorExceptions),
+    ]);
+    setTracks(snapshot.library.map(importedTrackToTrack));
+    setInboxTracks(snapshot.inbox.map(importedTrackToTrack));
+    setRecentlyPlayedTracks(recentlyPlayedSnapshot.map(importedTrackToTrack));
+
+    const params = new URLSearchParams();
+    params.set("value", result.name);
+    params.set(
+      "artistId",
+      result.musicBrainzId
+        ? `mbid:${result.musicBrainzId.toLocaleLowerCase()}`
+        : result.artistId,
+    );
+    navigate({ pathname: "/collection/artists", search: params.toString() }, { replace: true });
+    notify.success(t("toast.artist.merged", {
+      source: source.name,
+      target: result.name,
+    }));
+  }, [
+    artistSeparatorExceptions,
+    libraryRoot,
+    navigate,
+    resolveDbPath,
+    setInboxTracks,
+    setRecentlyPlayedTracks,
+    setTracks,
+  ]);
+
   const filterFormats = useMemo(
     () => listTrackFormats(displayedTracks),
     [displayedTracks],
@@ -507,8 +574,8 @@ function App() {
     }
     const next = [...filteredTracks];
     next.sort((left, right) => {
-      const leftValue = getSortableValue(left, sortState.key);
-      const rightValue = getSortableValue(right, sortState.key);
+      const leftValue = getSortableValue(left, sortState.key, playlistMembershipByTrackId);
+      const rightValue = getSortableValue(right, sortState.key, playlistMembershipByTrackId);
 
       if (leftValue === null && rightValue === null) {
         return 0;
@@ -524,7 +591,7 @@ function App() {
       return sortState.direction === "asc" ? result : -result;
     });
     return next;
-  }, [filteredTracks, sortState]);
+  }, [filteredTracks, playlistMembershipByTrackId, sortState]);
 
   const selectedVisibleTrackIds = useMemo(
     () => sortedTracks.filter((track) => selectedIds.has(track.id)).map((track) => track.id),
@@ -557,7 +624,7 @@ function App() {
     handleColumnResize,
     reorderColumns,
     toggleColumn,
-  } = useColumns({ tracks });
+  } = useColumns({ tracks, playlistMembershipByTrackId });
 
   // Context menus
   const { closeMenu, menuPosition, menuSelection, openForRow, openForSelection, openMenuId } =
@@ -1913,6 +1980,12 @@ function App() {
         onApply={handleSelectArtistImage}
         onOpenSource={handleOpenArtistSource}
       />
+      <ArtistMergeModal
+        artists={artistIndexItems}
+        source={artistMergeSource}
+        onClose={() => setArtistMergeSource(null)}
+        onMerge={handleMergeArtists}
+      />
       <ArtistSeparatorReviewModal
         candidate={artistSeparatorReview?.candidates[0] ?? null}
         position={(artistSeparatorReview?.completed ?? 0) + 1}
@@ -2191,12 +2264,18 @@ function App() {
                             onChangePicture={() => setArtistImageTarget(
                               selectedArtistTarget ?? legacyArtistCredit(selectedArtistName),
                             )}
+                            onMerge={
+                              selectedArtistTarget && artistIndexItems.length > 1
+                                ? () => setArtistMergeSource(selectedArtistTarget)
+                                : undefined
+                            }
                             onOpenSource={handleOpenArtistSource}
                           />
                         )}
                         <TrackTable
                           tracks={sortedTracks}
                           columns={columns}
+                          playlistMembershipByTrackId={playlistMembershipByTrackId}
                           emptyTitle={
                             hasTrackSearchFilters && sortedTracks.length === 0
                               ? t("search.noResults")
@@ -2242,6 +2321,7 @@ function App() {
                           onTogglePlay={togglePlay}
                           onOpenArtist={handleOpenArtist}
                           onOpenAlbum={handleOpenTableAlbum}
+                          onOpenPlaylist={handleOpenPlaylist}
                           onAlbumContextMenu={handleTableAlbumContextMenu}
                           onColumnResize={handleColumnResize}
                           onColumnAutoFit={autoFitColumn}
@@ -2293,6 +2373,8 @@ function App() {
               queueTracks={queueTracks}
               playingNextTracks={playingNextTracks}
               allTracks={allTracks}
+              libraryTracks={tracks}
+              playlists={playlists}
               currentTrack={currentTrack}
               currentTrackDetails={currentTrack ? allTracks.find((track) => track.id === currentTrack.id) : null}
               currentPlaylist={viewConfig.playlist}
@@ -2301,6 +2383,9 @@ function App() {
               onReorderPlayingNext={reorderPlayingNext}
               onMovePlayingNextToQueue={movePlayingNextToQueue}
               onClearQueue={clearQueue}
+              onReplaceQueue={setQueue}
+              onAddToQueue={addToQueue}
+              onCreatePlaylist={handleCreatePlaylist}
               onPlayTrack={(trackId) => playTrackById(trackId)}
               onPlayNext={(trackId) => playNext([trackId])}
               onMixWithCurrent={djMixEnabled

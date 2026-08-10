@@ -224,6 +224,7 @@ export type ColumnKey =
   | "artist"
   | "artists"
   | "album"
+  | "playlists"
   | "trackNumber"
   | "trackTotal"
   | "discNumber"

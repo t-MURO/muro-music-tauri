@@ -1,4 +1,4 @@
-import { memo, useRef } from "react";
+import { Fragment, memo, useRef } from "react";
 import { Circle, FileWarning, Music2, Play } from "lucide-react";
 import { convertFileSrc } from "@muro/desktop/runtime";
 import { t } from "../../i18n";
@@ -10,11 +10,16 @@ import {
   type ArtistTarget,
 } from "../../utils/artistCredits";
 import { getCamelotColor } from "../../utils/camelot";
+import {
+  formatPlaylistMembership,
+  type TrackPlaylistMembership,
+} from "../../utils/playlistMembership";
 import { ArtistCreditLinks } from "./ArtistCreditLinks";
 import { RatingCell } from "./RatingCell";
 
 type TableRowProps = {
   track: Track;
+  playlistMembership: readonly TrackPlaylistMembership[];
   index: number;
   isSelected: boolean;
   isPlayingTrack: boolean;
@@ -40,6 +45,7 @@ type TableRowProps = {
   onRowDoubleClick?: (trackId: string) => void;
   onOpenArtist?: (artist: ArtistTarget) => void;
   onOpenAlbum?: (trackId: string) => void;
+  onOpenPlaylist?: (playlistId: string) => void;
   onAlbumContextMenu?: (event: React.MouseEvent, trackId: string) => void;
   onRatingChange: (id: string, rating: number) => void;
 };
@@ -52,10 +58,16 @@ const formatFileSize = (bytes: number) => {
   return `${value.toFixed(value >= 10 ? 1 : 2)} ${units[unitIndex]}`;
 };
 
-const getColumnDisplayValue = (track: Track, key: ColumnConfig["key"]) => {
+const getColumnDisplayValue = (
+  track: Track,
+  key: ColumnConfig["key"],
+  playlistMembership: readonly TrackPlaylistMembership[],
+) => {
   switch (key) {
     case "artists":
       return explicitAlbumArtistDisplay(track);
+    case "playlists":
+      return formatPlaylistMembership(playlistMembership);
     case "trackNumber":
       return track.trackNumber === undefined || track.trackNumber === null
         ? ""
@@ -118,6 +130,7 @@ const getColumnDisplayValue = (track: Track, key: ColumnConfig["key"]) => {
 export const TableRow = memo(
   ({
     track,
+    playlistMembership,
     index,
     isSelected,
     isPlayingTrack,
@@ -134,6 +147,7 @@ export const TableRow = memo(
     onRowDoubleClick,
     onOpenArtist,
     onOpenAlbum,
+    onOpenPlaylist,
     onAlbumContextMenu,
     onRatingChange,
   }: TableRowProps) => {
@@ -223,7 +237,7 @@ export const TableRow = memo(
           </span>
         </div>
         {visibleColumns.map((column) => {
-          const value = getColumnDisplayValue(track, column.key);
+          const value = getColumnDisplayValue(track, column.key, playlistMembership);
           if (column.key === "rating") {
             const currentRating = Number(track.rating) || 0;
             return (
@@ -245,6 +259,9 @@ export const TableRow = memo(
             column.key === "artist" || column.key === "artists"
           ) && Boolean(value) && Boolean(onOpenArtist);
           const isAlbumLink = column.key === "album" && Boolean(value) && Boolean(onOpenAlbum);
+          const isPlaylistLink = column.key === "playlists"
+            && playlistMembership.length > 0
+            && Boolean(onOpenPlaylist);
           return (
             <div
               key={column.key}
@@ -305,6 +322,27 @@ export const TableRow = memo(
                 >
                   {value}
                 </button>
+              ) : isPlaylistLink ? (
+                <span className="block min-w-0 max-w-full truncate" title={value}>
+                  {playlistMembership.map((playlist, playlistIndex) => (
+                    <Fragment key={playlist.id}>
+                      {playlistIndex > 0 && ", "}
+                      <button
+                        type="button"
+                        className="transition-colors hover:text-[var(--color-accent)] hover:underline focus-visible:text-[var(--color-accent)] focus-visible:underline focus-visible:outline-none"
+                        title={`Open playlist ${playlist.name}`}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onOpenPlaylist?.(playlist.id);
+                        }}
+                        onDoubleClick={(event) => event.stopPropagation()}
+                        data-track-playlist-link={playlist.id}
+                      >
+                        {playlist.name}
+                      </button>
+                    </Fragment>
+                  ))}
+                </span>
               ) : (
                 <span
                   className="block truncate"

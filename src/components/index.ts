@@ -22,6 +22,7 @@ export {
   ArtistIndexView,
   ArtistDetailPanel,
   buildArtistIndexItems,
+  type ArtistIndexItem,
   TrackSelectionBar,
   CollectionIndexView,
   buildCollectionIndexItems,
@@ -38,6 +39,7 @@ export {
   AlbumMetadataSearchModal,
   AcoustIdModal,
   ArtistImageModal,
+  ArtistMergeModal,
   ArtistSeparatorReviewModal,
   PlaylistContextMenu,
   PlaylistCreateModal,
@@ -54,4 +56,4 @@ export {
   CommandPalette,
   type CommandPaletteItem,
 } from "./ui";
-export { CamelotWheel, MixSuggestions, NowPlayingTrack, QueueItem } from "./queue";
+export { CamelotWheel, MixSuggestions, NowPlayingTrack, QueueItem, SetPlanner } from "./queue";

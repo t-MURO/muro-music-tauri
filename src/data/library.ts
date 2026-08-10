@@ -11,6 +11,7 @@ export const baseColumns: ColumnConfig[] = [
   { key: "artist", labelKey: "columns.artist", visible: true, width: 160 },
   { key: "artists", labelKey: "columns.artists", visible: false, width: 220 },
   { key: "album", labelKey: "columns.album", visible: true, width: 120 },
+  { key: "playlists", labelKey: "columns.playlists", visible: false, width: 220 },
   { key: "trackNumber", labelKey: "columns.trackNumber", visible: false, width: 120 },
   { key: "trackTotal", labelKey: "columns.trackTotal", visible: false, width: 120 },
   { key: "discNumber", labelKey: "columns.discNumber", visible: false, width: 90 },

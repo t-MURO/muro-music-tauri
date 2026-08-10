@@ -36,7 +36,7 @@ export const buildArtistIndexItems = (tracks: Track[]): ArtistIndexItem[] => {
       const albums = new Set<string>();
       if (track.album.trim()) albums.add(track.album.trim().toLocaleLowerCase());
       artists.set(identity, {
-        artistId: identity,
+        artistId: credit.artistId || identity,
         name,
         creditedName: credit.creditedName || name,
         musicBrainzId: credit.musicBrainzId,

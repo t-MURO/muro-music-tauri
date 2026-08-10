@@ -4,12 +4,14 @@ import { t } from "../i18n";
 import type { ColumnConfig, Track } from "../types";
 import { useStickyState } from "./useStickyState";
 import { parseColumns } from "../utils";
+import { formatPlaylistMembership, type TrackPlaylistMembership } from "../utils/playlistMembership";
 
 type UseColumnsArgs = {
   tracks: Track[];
+  playlistMembershipByTrackId: ReadonlyMap<string, readonly TrackPlaylistMembership[]>;
 };
 
-export const useColumns = ({ tracks }: UseColumnsArgs) => {
+export const useColumns = ({ tracks, playlistMembershipByTrackId }: UseColumnsArgs) => {
   const [columns, setColumns] = useStickyState("muro-columns", baseColumns, {
     parse: parseColumns,
     serialize: (value) => JSON.stringify(value),
@@ -44,6 +46,9 @@ export const useColumns = ({ tracks }: UseColumnsArgs) => {
             const extensionParts = filename.split(".");
             return filename.includes(".") ? (extensionParts[extensionParts.length - 1]?.length ?? 0) : 0;
           }
+          if (key === "playlists") {
+            return formatPlaylistMembership(playlistMembershipByTrackId.get(track.id)).length;
+          }
           const value = track[key as keyof Track];
           return value === undefined || value === null ? 0 : String(value).length;
         })
@@ -56,7 +61,7 @@ export const useColumns = ({ tracks }: UseColumnsArgs) => {
         )
       );
     },
-    [columns, setColumns, tracks]
+    [columns, playlistMembershipByTrackId, setColumns, tracks]
   );
 
   const handleColumnResize = useCallback(

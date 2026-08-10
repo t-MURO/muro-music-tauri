@@ -1,5 +1,6 @@
 import type { ColumnConfig, Track } from "../types";
 import { explicitAlbumArtistDisplay } from "./artistCredits";
+import { formatPlaylistMembership, type TrackPlaylistMembership } from "./playlistMembership";
 
 /**
  * Gets a sortable value from a track based on the column key.
@@ -7,7 +8,8 @@ import { explicitAlbumArtistDisplay } from "./artistCredits";
  */
 export const getSortableValue = (
   track: Track,
-  key: ColumnConfig["key"]
+  key: ColumnConfig["key"],
+  playlistMembershipByTrackId?: ReadonlyMap<string, readonly TrackPlaylistMembership[]>,
 ): string | number | null => {
   switch (key) {
     case "duration":
@@ -26,6 +28,8 @@ export const getSortableValue = (
       return track.bpm ?? null;
     case "artists":
       return explicitAlbumArtistDisplay(track) || null;
+    case "playlists":
+      return formatPlaylistMembership(playlistMembershipByTrackId?.get(track.id)) || null;
     case "key":
       return track.key ?? null;
     case "format": {

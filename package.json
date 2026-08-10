@@ -21,7 +21,7 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "build:win": "tauri build --target x86_64-pc-windows-msvc",
-    "test:portable": "node tests/beatgrid-smoke.mjs && node tests/mixplan-smoke.mjs && node tests/artist-separator-smoke.mjs && node tests/i18n-smoke.mjs && node tests/loudness-smoke.mjs && node tests/playback-guard-smoke.mjs",
+    "test:portable": "node tests/beatgrid-smoke.mjs && node tests/mixplan-smoke.mjs && node tests/set-planner-smoke.mjs && node tests/artist-separator-smoke.mjs && node tests/i18n-smoke.mjs && node tests/loudness-smoke.mjs && node tests/playback-guard-smoke.mjs",
     "check": "npm run typecheck && npm run test:portable",
     "check:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check && cargo check --manifest-path src-tauri/Cargo.toml && cargo test --manifest-path src-tauri/Cargo.toml --lib --no-run",
     "verify:release": "npm run check && npm run prepare:native-sidecars && npm run check:rust && npm run build"
